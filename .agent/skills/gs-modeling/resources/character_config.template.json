@@ -1,0 +1,64 @@
+{
+  "asset_id": "my_character",
+  "version": "v1",
+  "work_dir": "work/my_character",
+  "input_design_sheet": "inputs/design_sheet.jpg",
+  "comfyui": {
+    "api_url": "http://127.0.0.1:8194",
+    "num_gaussians": 65536,
+    "seed": 46,
+    "template_prompt_json": ""
+  },
+  "gate0_input_thresholds": {
+    "min_body_height_px": 600,
+    "min_face_width_px": 120,
+    "min_hand_width_px": 40,
+    "min_front_face_splats": 2500
+  },
+  "background": {
+    "auto_detect_from_corners": true,
+    "bg_rgb": null,
+    "lab_outer_thresh": 22.0,
+    "lab_interior_thresh": 26.0,
+    "remove_fringe_lab_thresh": 28.0
+  },
+  "proportions": {
+    "preset_note": "Default values tuned for ~2.5-3.0 head-tall chibi/doll. For 6-8 head-tall anime, raise eye_z_range to ~[0.88, 0.92], neck_z_range to ~[0.81, 0.86], arm_z_range to ~[0.68, 0.83], legs_max_z to ~0.44, and scale eyeball/eyelid radii proportionally to inter-ocular distance D_eye.",
+    "eye_z_range": [0.715, 0.790],
+    "face_z_range": [0.71, 0.83],
+    "neck_z_range": [0.640, 0.695],
+    "arm_z_range": [0.38, 0.63],
+    "arm_cut_abs_x": 0.095,
+    "shoulder_half_width": 0.078,
+    "wrist_scan_s_range": [0.72, 0.88],
+    "skirt_z_range": [0.24, 0.50],
+    "legs_max_z": 0.24,
+    "eyeball_radius": 0.0260,
+    "socket_exclusion_radius": [0.0245, 0.0320, 0.0195],
+    "eyelid_shell_rx_rz": [0.0385, 0.0315],
+    "eyelid_lash_top_bottom_z": [0.0115, -0.0195]
+  },
+  "colors": {
+    "auto_sample_iris_from_source": true,
+    "iris_bottom_rgb": [0.96, 0.46, 0.40],
+    "iris_mid_rgb": [0.74, 0.20, 0.20],
+    "iris_top_rgb": [0.33, 0.10, 0.12],
+    "iris_glow_rgb": [1.00, 0.68, 0.58],
+    "pupil_rgb": [0.23, 0.08, 0.09],
+    "rim_rgb": [0.32, 0.13, 0.13],
+    "lash_rgb": [0.26, 0.12, 0.12],
+    "lip_line_rgb": [0.78, 0.45, 0.44]
+  },
+  "qa_thresholds": {
+    "max_arm_tear_ratio": 0.005,
+    "max_region_tear_ratio": 0.005,
+    "max_bone_deviation": 0.012,
+    "max_shoulder_sym_diff": 0.001,
+    "max_shoulder_bulge_ratio": 1.15,
+    "max_idle_wrist_z_err": 0.025,
+    "max_eyelid_hair_overlap": 0.02,
+    "max_foot_ground_err": 0.005,
+    "min_elbow_down_back_dot": 0.70,
+    "min_palm_camera_dot": 0.80
+  }
+}

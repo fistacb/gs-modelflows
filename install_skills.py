@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Sync gs-modelflows skills across repo agent directories or install globally.
+
+Usage:
+    # Keep .agent/skills, .agents/skills, and .claude/skills in sync with skills/
+    python install_skills.py --sync-repo
+
+    # Install globally for Antigravity, Claude Code, and/or Codex
+    python install_skills.py --target all
+    python install_skills.py --target claude
+    python install_skills.py --target codex
+    python install_skills.py --target antigravity
+"""
+import argparse
+import shutil
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent
+SKILLS_SRC = REPO_ROOT / "skills"
+SKILL_NAMES = ("gs-modeling", "gs-to-sprite", "gs-to-mesh")
+
+REPO_AGENT_DIRS = [
+    REPO_ROOT / ".agent" / "skills",
+    REPO_ROOT / ".agents" / "skills",
+    REPO_ROOT / ".claude" / "skills",
+]
+
+
+def copy_skill_tree(src: Path, dst: Path) -> None:
+    if dst.exists() or dst.is_symlink():
+        if dst.is_symlink() or dst.is_file():
+            dst.unlink()
+        else:
+            shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        src,
+        dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
+    )
+
+
+def sync_repo() -> None:
+    for agent_dir in REPO_AGENT_DIRS:
+        for name in SKILL_NAMES:
+            src = SKILLS_SRC / name
+            if not src.exists():
+                raise FileNotFoundError(f"Missing canonical skill: {src}")
+            dst = agent_dir / name
+            copy_skill_tree(src, dst)
+        print(f"[sync-repo] Updated {agent_dir.relative_to(REPO_ROOT)}")
+
+
+def global_target_dirs(target: str) -> list[tuple[str, Path]]:
+    home = Path.home()
+    mapping = {
+        "antigravity": home / ".gemini" / "config" / "skills",
+        "claude": home / ".claude" / "skills",
+        "codex": home / ".codex" / "skills",
+    }
+    if target == "all":
+        return list(mapping.items())
+    return [(target, mapping[target])]
+
+
+def install_global(target: str) -> None:
+    for label, root_dir in global_target_dirs(target):
+        for name in SKILL_NAMES:
+            src = SKILLS_SRC / name
+            dst = root_dir / name
+            copy_skill_tree(src, dst)
+        print(f"[install] Installed {len(SKILL_NAMES)} skills for {label} -> {root_dir}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Sync or install gs-modelflows skills.")
+    parser.add_argument(
+        "--sync-repo",
+        action="store_true",
+        help="Synchronize .agent/skills, .agents/skills, and .claude/skills from skills/.",
+    )
+    parser.add_argument(
+        "--target",
+        choices=("all", "antigravity", "claude", "codex"),
+        help="Install skills into global agent skill directory.",
+    )
+    args = parser.parse_args()
+    if not args.sync_repo and not args.target:
+        parser.print_help()
+        return
+    if args.sync_repo:
+        sync_repo()
+    if args.target:
+        install_global(args.target)
+
+
+if __name__ == "__main__":
+    main()

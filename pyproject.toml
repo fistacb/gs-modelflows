@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gs-modelflows"
+version = "0.1.0"
+description = "Modular 3D Gaussian Splatting (3DGS) pipelines for character modeling/rigging, HD-2D game sprites, and watertight STL/mesh export."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+video = [
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+]
+mesh = [
+    "scikit-image>=0.22",
+    "torch>=2.1",
+]
+all = [
+    "imageio>=2.31",
+    "imageio-ffmpeg>=0.4.9",
+    "scikit-image>=0.22",
+    "torch>=2.1",
+]

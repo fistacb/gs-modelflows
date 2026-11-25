@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Node / Spark Renderer caches
+node_modules/
+renderer/spark_demo/vendor/
+renderer/spark_demo/temp/
+renderer/spark_demo/frames/
+renderer/spark_demo/assets/
+renderer/spark_demo/evidence/
+renderer/spark_demo/renders*/
+renderer/spark_demo/*.ply
+
+# 3DGS / Mesh / Media outputs & local workspaces
+work/
+output/
+outputs/
+input/
+inputs/
+packages/
+exports/
+evidence/
+qa/
+temp/
+tmp/
+*.ply
+*.spz
+*.stl
+*.obj
+*.mtl
+*.glb
+*.gltf
+*.fbx
+*.blend
+*.blend1
+*.npz
+*.bin
+*.mp4
+*.gif
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
