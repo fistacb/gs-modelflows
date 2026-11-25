@@ -54,15 +54,15 @@ $env:GS_SPARK_DIR = "C:\path\to\gs-modelflows\renderer\spark_demo"
 2D 画像から `step0_generate_ply.py` で新しく 3DGS `.ply` を生成する場合は、以下の手順で準備します：
 
 1. ComfyUI（`>= 0.41.0`）をインストールし、ポート `8188` で起動します（別ポートを使う場合は `GS_COMFYUI_URL` を合わせてください）。
-2. ComfyUI 公式の TripoSplat チュートリアル（[https://docs.comfy.org/tutorials/3d/triposplat](https://docs.comfy.org/tutorials/3d/triposplat)）を参考に、**TripoSplat** 用ノードおよび `skills/gs-modeling/resources/triposplat_api_workflow.template.json` が参照するモデル重みを配置します：
+2. ComfyUI 公式の TripoSplat チュートリアル（[https://docs.comfy.org/tutorials/3d/triposplat](https://docs.comfy.org/tutorials/3d/triposplat)）を参考に、**TripoSplat** 用ノードおよび `skills/gs-modeling/resources/triposplat_api_workflow.template.json` が参照するモデル重みを `ComfyUI/models/` 配下の各フォルダへ配置します：
 
-| ファイル名 | 役割 | 入手元 | ライセンス |
-| :--- | :--- | :--- | :--- |
-| `triposplat_fp16.safetensors` | TripoSplat UNet（拡散モデル本体） | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/diffusion_models/triposplat_fp16.safetensors) | MIT |
-| `triposplat_vae_decoder_fp16.safetensors` | TripoSplat VAE デコーダー | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/vae/triposplat_vae_decoder_fp16.safetensors) | MIT |
-| `dino_v3_vit_h.safetensors` | CLIP Vision エンコーダー | [facebook/dinov3-vith16plus-pretrain-lvd1689m](https://huggingface.co/facebook/dinov3-vith16plus-pretrain-lvd1689m)（ComfyUI チュートリアル案内ミラー: [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/clip_vision/dino_v3_vit_h.safetensors)） | DINOv3 License（Meta 独自ライセンス。商用利用は可、軍事用途は禁止、再配布時はライセンスの同梱が必要） |
-| `flux2-vae.safetensors` | VAE（潜在表現エンコード） | Black Forest Labs 公式（[black-forest-labs](https://huggingface.co/black-forest-labs)）または ComfyUI チュートリアル案内先（[docs.comfy.org/tutorials/3d/triposplat](https://docs.comfy.org/tutorials/3d/triposplat)） | Apache 2.0（BFL 公式）。※ミラーによっては非商用ライセンス（FLUX.2-klein-9B 由来など）と表記されているため、**公式または Apache 2.0 と明記された配布元から入手すること** |
-| `birefnet.safetensors`（任意） | 背景除去（ニューラル前処理） | [ZhengPeng7/BiRefNet](https://huggingface.co/ZhengPeng7/BiRefNet)（ComfyUI チュートリアル案内ミラー: [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/background_removal/birefnet.safetensors)） | MIT |
+| ファイル名 | 保存先（`ComfyUI/models/` 配下） | 役割 | ダウンロード先 | ライセンスの根拠 | ライセンス |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| `triposplat_fp16.safetensors` | `diffusion_models/` | TripoSplat UNet（拡散モデル本体） | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/diffusion_models/triposplat_fp16.safetensors) | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat) | MIT |
+| `triposplat_vae_decoder_fp16.safetensors` | `vae/` | TripoSplat VAE デコーダー | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/vae/triposplat_vae_decoder_fp16.safetensors) | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat) | MIT |
+| `dino_v3_vit_h.safetensors` | `clip_vision/` | CLIP Vision エンコーダー | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/clip_vision/dino_v3_vit_h.safetensors) | Meta 公式（[facebook/dinov3-vith16plus-pretrain-lvd1689m](https://huggingface.co/facebook/dinov3-vith16plus-pretrain-lvd1689m) / [DINOv3 License](https://ai.meta.com/resources/models-and-libraries/dinov3-license/)） | DINOv3 License（Meta 独自ライセンス。商用利用は可、軍事用途は禁止、再配布時はライセンスの同梱が必要） |
+| `flux2-vae.safetensors` | `vae/` | VAE（潜在表現エンコード） | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/vae/flux2-vae.safetensors) | Black Forest Labs 公式（[bfl.ai/blog/flux-2](https://bfl.ai/blog/flux-2) / [black-forest-labs/flux2](https://github.com/black-forest-labs/flux2)） | Apache 2.0（BFL 公式）。※ミラーによっては非商用ライセンス（FLUX.2-klein-9B 由来など）と表記されているため、**公式または Apache 2.0 と明記された配布元から入手すること** |
+| `birefnet.safetensors`（任意） | `background_removal/` | 背景除去（ニューラル前処理） | [VAST-AI/TripoSplat](https://huggingface.co/VAST-AI/TripoSplat/blob/main/background_removal/birefnet.safetensors) | [ZhengPeng7/BiRefNet](https://huggingface.co/ZhengPeng7/BiRefNet) | MIT |
 
 ※各ライセンスの最新の条件は原文を確認してください。
 
