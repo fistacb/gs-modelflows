@@ -1,3 +1,5 @@
+English | [日本語](README.ja.md)
+
 # gs-modelflows
 
 Modular local **3D Gaussian Splatting (3DGS)** asset pipelines and **multi-agent skills** (compatible with **Antigravity**, **Claude Code**, and **OpenAI Codex**).
