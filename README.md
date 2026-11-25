@@ -33,27 +33,29 @@ gs-modelflows/
 
 ### 1. Python & Renderer Setup
 
+See [docs/SETUP.md](docs/SETUP.md) for the complete step-by-step setup (including optional local ComfyUI + TripoSplat).
+
 ```bash
 pip install -e ".[all]"
-```
-
-Set up the Spark GPU renderer vendor dependencies (three.js + `@sparkjsdev/spark`):
-
-```bash
-cd renderer/spark_demo
-npm install
-npm run sync-vendor
+cd renderer/spark_demo && npm install && npm run sync-vendor
+cd ../..
+python check_env.py
 ```
 
 Optional environment variables (defaults auto-detect when available):
 
 | Variable | Purpose | Default |
 | :--- | :--- | :--- |
-| `GS_COMFYUI_DIR` | Local ComfyUI repository root (for TripoSplat / `_splat_density`) | *(unset)* |
+| `GS_COMFYUI_DIR` | Local ComfyUI repository root (for `_splat_density` acceleration) | *(unset — uses PyTorch fallback)* |
 | `GS_COMFYUI_URL` | Local ComfyUI API endpoint | `http://127.0.0.1:8188` |
 | `GS_BLENDER_BIN` | Path to Blender CLI executable (`>= 4.2` / `5.x`) | `blender` |
+| `GS_SPARK_DIR` | Path to `renderer/spark_demo` (recommended when using global skills) | auto-detected |
 | `SPARK_CHROME` | Path to Chrome/Chromium executable for headless WebGL | auto-detected |
 | `SPARK_SOFTWARE` | Set to `1` to force SwiftShader software WebGL | `0` |
+
+> **Platform & Language Notes**:
+> - Verified primarily on **Windows 11 (NVIDIA GPU)**; macOS and Linux are supported via cross-platform WebGL flags (`SPARK_SOFTWARE=1` fallback available).
+> - Top-level docs (`README.md`, `AGENTS.md`, `docs/SETUP.md`) are in English; detailed `SKILL.md` workflow guides are currently written in Japanese (readable by all supported coding agents).
 
 ### 2. Using with Antigravity, Claude Code, or Codex
 
@@ -114,3 +116,5 @@ blender -b --python skills/gs-to-mesh/scripts/assemble_watertight_stl.py -- \
 ## License
 
 MIT License — see [LICENSE](LICENSE).
+
+> **Third-party models & tools**: External models and tools referenced by optional workflows (such as TripoSplat, BiRefNet, ComfyUI, Blender, three.js, and `@sparkjsdev/spark`) are **not** bundled in this repository and remain subject to their respective licenses.

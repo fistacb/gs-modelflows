@@ -4,7 +4,7 @@
   "work_dir": "work/my_character",
   "input_design_sheet": "inputs/design_sheet.jpg",
   "comfyui": {
-    "api_url": "http://127.0.0.1:8194",
+    "api_url": "http://127.0.0.1:8188",
     "num_gaussians": 65536,
     "seed": 46,
     "template_prompt_json": ""
@@ -39,6 +39,7 @@
     "eyelid_lash_top_bottom_z": [0.0115, -0.0195]
   },
   "colors": {
+    "preset_note": "Example fallback palette (warm red iris). When auto_sample_iris_from_source is true, iris/skin colors are sampled automatically from the input character.",
     "auto_sample_iris_from_source": true,
     "iris_bottom_rgb": [0.96, 0.46, 0.40],
     "iris_mid_rgb": [0.74, 0.20, 0.20],

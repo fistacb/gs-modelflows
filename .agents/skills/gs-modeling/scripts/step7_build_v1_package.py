@@ -516,7 +516,7 @@ def main():
         "version": version,
         "frozen": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "source_workflow": "ComfyUI TripoSplat 262144 + HD Head ICP -> normalize -> carve_sockets -> bilateral_polish -> doll_eyes_v2 -> data_driven_full_rig",
+        "source_workflow": f"gs-modeling ({int(len(master))} splats) -> normalize -> carve_sockets -> polish -> doll_eyes -> data_driven_full_rig",
         "supported_pipelines": ["animation_spark_3dgs", "fdm_print_remesh_ready"],
         "face_rig_mode": "doll_eye_with_independent_eyelid_shells",
         "master_stats": {

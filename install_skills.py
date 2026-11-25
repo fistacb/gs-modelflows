@@ -64,13 +64,20 @@ def global_target_dirs(target: str) -> list[tuple[str, Path]]:
     return [(target, mapping[target])]
 
 
-def install_global(target: str) -> None:
+def install_global(target: str, force: bool = False) -> None:
+    spark_dir = (REPO_ROOT / "renderer" / "spark_demo").resolve()
     for label, root_dir in global_target_dirs(target):
+        installed = 0
         for name in SKILL_NAMES:
             src = SKILLS_SRC / name
             dst = root_dir / name
+            if (dst.exists() or dst.is_symlink()) and not force:
+                print(f"[install] Skipped existing {dst} (pass --force to overwrite)")
+                continue
             copy_skill_tree(src, dst)
-        print(f"[install] Installed {len(SKILL_NAMES)} skills for {label} -> {root_dir}")
+            installed += 1
+        print(f"[install] Installed {installed}/{len(SKILL_NAMES)} skills for {label} -> {root_dir}")
+    print(f"[install] Tip: set GS_SPARK_DIR={spark_dir} so global skills can locate renderer/spark_demo.")
 
 
 def main() -> None:
@@ -85,6 +92,11 @@ def main() -> None:
         choices=("all", "antigravity", "claude", "codex"),
         help="Install skills into global agent skill directory.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing skills in global target directories.",
+    )
     args = parser.parse_args()
     if not args.sync_repo and not args.target:
         parser.print_help()
@@ -92,7 +104,7 @@ def main() -> None:
     if args.sync_repo:
         sync_repo()
     if args.target:
-        install_global(args.target)
+        install_global(args.target, force=args.force)
 
 
 if __name__ == "__main__":

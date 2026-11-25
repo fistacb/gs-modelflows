@@ -57,7 +57,9 @@ const profile = await mkdtemp(fileURLToPath(new URL('temp/chrome-', root)));
 const useSoftware = process.env.SPARK_SOFTWARE === '1';
 const gpuFlags = useSoftware
   ? ['--headless', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
-  : ['--headless=new', '--use-gl=angle', '--use-angle=d3d11', '--enable-webgl', '--ignore-gpu-blocklist'];
+  : process.platform === 'win32'
+    ? ['--headless=new', '--use-gl=angle', '--use-angle=d3d11', '--enable-webgl', '--ignore-gpu-blocklist']
+    : ['--headless=new', '--enable-webgl', '--ignore-gpu-blocklist'];
 function findChrome() {
   if (process.env.SPARK_CHROME) return process.env.SPARK_CHROME;
   const candidates = [

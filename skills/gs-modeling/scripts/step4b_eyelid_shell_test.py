@@ -6,7 +6,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 from ply_io import read_ply, write_ply
-from config_loader import load_config
+from config_loader import load_config, resolve_spark_dir
 
 SH_C0 = 0.28209479177387814
 
@@ -279,7 +279,7 @@ def main():
     cfg = load_config(args.config)
     work_dir = Path(cfg["work_dir"])
     ver_dir = work_dir / "packages" / cfg["asset_id"] / cfg["version"]
-    frames_dir = work_dir / "spark_demo" / "frames"
+    frames_dir = resolve_spark_dir(work_dir) / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
     prop, cols = cfg["proportions"], cfg["colors"]
 

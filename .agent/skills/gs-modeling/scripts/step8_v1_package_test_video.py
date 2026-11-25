@@ -8,7 +8,7 @@ from scipy.spatial import cKDTree
 from scipy.sparse.csgraph import connected_components
 from scipy.spatial.transform import Rotation
 from ply_io import read_ply, write_ply
-from config_loader import load_config
+from config_loader import load_config, resolve_spark_dir
 from step4b_eyelid_shell_test import build_eyelid_shell, detect_face_skin_mask
 
 
@@ -156,7 +156,7 @@ def main():
     work_dir = Path(cfg["work_dir"])
     prop, cols, qa_cfg = cfg["proportions"], cfg["colors"], cfg["qa_thresholds"]
     ver_dir = Path(args.ver_dir) if args.ver_dir else (work_dir / "packages" / cfg["asset_id"] / cfg["version"])
-    demo_dir = work_dir / "spark_demo"
+    demo_dir = resolve_spark_dir(work_dir)
     frames_dir = demo_dir / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
 

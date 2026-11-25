@@ -19,6 +19,7 @@ Pipeline:
 import argparse
 import json
 import math
+import os
 import shutil
 import subprocess
 import time
@@ -29,6 +30,11 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 
 def default_spark_dir() -> Path:
+    env_dir = os.environ.get("GS_SPARK_DIR")
+    if env_dir:
+        p = Path(env_dir)
+        if (p / "capture.mjs").exists():
+            return p
     here = Path(__file__).resolve()
     for parent in here.parents:
         cand = parent / "renderer" / "spark_demo"

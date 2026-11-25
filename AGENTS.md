@@ -20,11 +20,14 @@ This repository provides three modular **3D Gaussian Splatting (3DGS)** producti
 
 ## Environment Variables (No Hardcoded Paths)
 
-- `GS_COMFYUI_DIR` — Path to local ComfyUI installation (required for ComfyUI API / `_splat_density`).
+- `GS_COMFYUI_DIR` — Path to local ComfyUI installation (optional; accelerates `_splat_density`).
 - `GS_COMFYUI_URL` — Local ComfyUI endpoint (default: `http://127.0.0.1:8188`).
 - `GS_BLENDER_BIN` — Path to Blender CLI executable (default: `blender` on `PATH`).
+- `GS_SPARK_DIR` — Path to `renderer/spark_demo` (recommended when skills are installed globally).
 - `SPARK_CHROME` — Path to Chrome/Chromium binary for `renderer/spark_demo/capture.mjs` (auto-detected if omitted).
 - `SPARK_SOFTWARE=1` — Force SwiftShader software WebGL fallback when no GPU is available.
+
+Run `python check_env.py` first to inspect environment readiness. See `docs/SETUP.md` for full installation steps.
 
 ## Working Rules
 

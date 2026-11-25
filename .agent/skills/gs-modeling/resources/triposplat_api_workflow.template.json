@@ -1,0 +1,94 @@
+{
+  "2": {
+    "class_type": "TripoSplatPreprocessImage",
+    "inputs": {
+      "image": ["99", 0],
+      "mask": ["95", 0],
+      "erode_radius": 1,
+      "size": 1024
+    }
+  },
+  "6": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["16", 0],
+      "positive": ["24", 0],
+      "negative": ["24", 1],
+      "latent_image": ["24", 2],
+      "seed": 46,
+      "steps": 20,
+      "cfg": 3,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "simple",
+      "denoise": 1
+    }
+  },
+  "7": {
+    "class_type": "CLIPVisionLoader",
+    "inputs": {
+      "clip_name": "dino_v3_vit_h.safetensors"
+    }
+  },
+  "8": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    }
+  },
+  "11": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "triposplat_vae_decoder_fp16.safetensors"
+    }
+  },
+  "16": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "triposplat_fp16.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "24": {
+    "class_type": "TripoSplatConditioning",
+    "inputs": {
+      "clip_vision": ["7", 0],
+      "vae": ["8", 0],
+      "image": ["2", 0]
+    }
+  },
+  "51": {
+    "class_type": "SaveGLB",
+    "inputs": {
+      "mesh": ["92", 0],
+      "filename_prefix": "3d/step0_raw_65536_s46"
+    }
+  },
+  "55": {
+    "class_type": "VAEDecodeTripoSplat",
+    "inputs": {
+      "samples": ["6", 0],
+      "vae": ["11", 0],
+      "num_gaussians": 65536,
+      "seed": 42
+    }
+  },
+  "92": {
+    "class_type": "SplatToFile3D",
+    "inputs": {
+      "splat": ["55", 0],
+      "format": "ply"
+    }
+  },
+  "95": {
+    "class_type": "InvertMask",
+    "inputs": {
+      "mask": ["99", 1]
+    }
+  },
+  "99": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "front_refined.png"
+    }
+  }
+}

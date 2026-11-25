@@ -25,11 +25,13 @@ import torch
 
 def find_shared_dir() -> Path:
     here = Path(__file__).resolve()
+    if (here.parent / "ply_io.py").exists():
+        return here.parent
     for parent in here.parents:
         cand = parent / "shared"
         if (cand / "ply_io.py").exists():
             return cand
-    raise FileNotFoundError("Could not locate shared/ply_io.py")
+    raise FileNotFoundError("Could not locate ply_io.py alongside script or in shared/")
 
 
 sys.path.insert(0, str(find_shared_dir()))
