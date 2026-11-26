@@ -8,11 +8,13 @@
 
 ```
 python scripts/check_candidate.py --cand 03_body/work/try3.ply --ref 02_gen/chosen.ply \
-    --protect qa/protect_boxes.json --out qa/views/stage3/try3 --render
+    --protect qa/protect_boxes.json --out qa/views/stage3/try3
 ```
 
 - 数値（点数・NaN・高さ・3D 浮遊点・真横の体幹の傾き・靴底の傾き・過大スプラット・保護範囲の移動量・動いた範囲）を先に測り、**数値が通ったときだけ**レンダーする。
 - 会話に返るのは 1 行の要約だけ。詳しい値は `<out>.json` に残る。
+- 髪・襟など独立した部位は同じ基準 PLY から別々の候補を作り、各部位が通ってから統合する。失敗した部位の再試行で、通った部位の計測や撮影を繰り返さない。
+- 最初の撮影前に、最小の 1 ビューでレンダラーの起動を確かめる。試行の撮影は、数値だけで判断できない欠け・癒着・重なり・継ぎ目・色に絞り、`render_views.py --only` で最少の視点を選ぶ。既存の同一カメラ画像を比較に使う。固定の全撮影セットは確定時に実行する。
 - 変形は [splat_ops.py](../scripts/splat_ops.py) の `transform_gaussians` を使う（位置と一緒にガウスの向き・広がりを更新し、折り返す変形は `ValueError` で止まる）。キャラごとに変形器を書き直さない。
 
 ### 標準の道具（キャラごとに書き直さない）
@@ -32,7 +34,8 @@ python scripts/render_views.py --ply 03_body/work/posture.ply --out qa/views/sta
 
 ## 2. 数値の検査が先、目視は後
 
-- 数値で落ちた候補はレンダーしない・見ない。
+- 原画を同じ高さと基準位置に合わせ、3D 点群から色なしの正面投影・断面・近傍距離・連結成分を使って、輪郭・ランドマークの高さ・厚み・接続・保護部位を先に調べる。原画にない奥行きは、既存点群との自然な接続と干渉の有無で判定する。
+- 部位ごとに計測対象と合否基準を作業メモに書く。数値に届かない候補はレンダーせず、残った見た目の不確かさだけを画像で確かめる。
 - 目視で見つかった問題のうち数値にできるものは、`check_candidate.py` と `verify_gate.py` に足す。例: 真横 90° の体幹の傾き（`verify_gate.py --gate 1` でも検査。既定 ±8°）。
 - 傾きのしきい値を変えてよいのは、デザイン上の理由があるときだけ（大きなマント・尻尾・後ろに広がる髪・手に持った杖などで、中央値の線が引っ張られる場合）。`character_config.json` の `qa_thresholds.max_trunk_lean_deg` を変え、理由を同じファイルか `qa/attempt_log.md` に書く。実測例: 人型で直したもの +1°前後、直す前の sakura +40°、snowdrop の見逃し +21°、鳥の魔法使い +16°、杖を持つカエル −11°。
 
