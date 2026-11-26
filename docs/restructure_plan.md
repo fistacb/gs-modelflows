@@ -19,7 +19,7 @@
 1. 棚卸し（済。結果は下の「棚卸しの要点」）
 2. 段階ごとの取り決め（済。下の B-2）: 入出力のファイル名・フォルダ構成・合否の基準（verify_gate の数値とセルフチェックの関係）
 3. SKILL.md の書き直し（済）: 本体には流れと原則だけを書き、詳細は references/stage1〜5.md、キャラ条件別は character_conditions.md、用途オプションは options.md に分けた
-4. 道具の整備: 共通化の候補を標準スクリプトにする
+4. 道具の整備（済）: 共通化の候補を標準スクリプトにした。render_views（固定撮影セット・同じカメラでの前後比較）、correct_posture（真横の傾きを直す線形シアー）、align_rows（ランドマーク高さ合わせ）、remove_detached（浮遊塊の除去）、measure_landmarks（目印の高さ・輪郭の計測）、step0_matte_comfy（BiRefNet 切り抜き）、step0_prep_image の閉じた穴の判定（関数化・オプション化）。テストは tests/test_body_tools.py
 5. 検証: 新しい手順で 1 体を通し、速さと品質を今と比べる
 
 ## C. 高速化（品質を落とさない）

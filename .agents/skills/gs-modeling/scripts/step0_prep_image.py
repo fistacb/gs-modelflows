@@ -8,12 +8,49 @@ from PIL import Image
 from config_loader import load_config
 
 
+def interior_pockets(dist, outside, lab, outer_th, inner_th, min_hole=800, min_outlined_hole=40, outline_L=12.0):
+    """Enclosed background pockets (gaps between arm and body, between legs) to make transparent.
+
+    dist: Lab distance to the background colour, outside: flood-filled outer background (bool),
+    lab: the image in OpenCV Lab (uint8 scale). A pocket close to the background colour is kept as
+    background when it is large (>= min_hole px) or when its surrounding ring is dark line art
+    (20th percentile of L below outline_L, pockets >= min_outlined_hole px). Small pockets ringed by
+    bright colour are highlights (nose, gems, glasses, white clothing) and stay opaque.
+    Returns (mask, kept) where kept lists (x, y, area) of the pockets made transparent.
+    """
+    interior = ((dist < inner_th) & ~outside).astype(np.uint8)
+    n_i, lab_i, st_i, _ = cv2.connectedComponentsWithStats(interior, connectivity=8)
+    loose = ((dist < outer_th) & ~outside).astype(np.uint8)  # ring is measured around the loose region
+    _, lab_l, _, _ = cv2.connectedComponentsWithStats(loose, connectivity=8)
+    L_chan = lab[..., 0].astype(np.float32) * (100.0 / 255.0)
+    ring_k = np.ones((7, 7), np.uint8)
+    keep = np.zeros(n_i, bool)
+    for k in range(1, n_i):
+        area = st_i[k, cv2.CC_STAT_AREA]
+        if area >= min_hole:
+            keep[k] = True
+            continue
+        if area < min_outlined_hole:
+            continue
+        ys, xs = np.nonzero(lab_i == k)
+        reg = (lab_l == lab_l[ys[0], xs[0]]).astype(np.uint8)
+        ring = cv2.dilate(reg, ring_k) - reg
+        if ring.any() and float(np.percentile(L_chan[ring > 0], 20)) < outline_L:
+            keep[k] = True
+    kept = [(int(st_i[k, 0]), int(st_i[k, 1]), int(st_i[k, 4])) for k in range(1, n_i) if keep[k]]
+    return keep[lab_i], kept
+
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=None)
     ap.add_argument("--src", default=None)
     ap.add_argument("--dst", default=None)
     ap.add_argument("--panels", type=int, default=None, help="Number of horizontal panels in design sheet (auto-detected if omitted: 1 for single image, 4 for wide sheet)")
+    ap.add_argument("--min-hole", type=int, default=800, help="enclosed background pockets this large are always transparent")
+    ap.add_argument("--min-outlined-hole", type=int, default=40, help="smaller pockets are transparent only when ringed by dark line art")
+    ap.add_argument("--outline-L", type=float, default=12.0, help="line-art darkness (Lab L, 0-100) of the ring")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -71,7 +108,9 @@ def main():
         if ff[y, 0] == 1: cv2.floodFill(ff, mask_ff, (0, y), 2)
         if ff[y, cw - 1] == 1: cv2.floodFill(ff, mask_ff, (cw - 1, y), 2)
 
-    interior_bg = dist < inner_th
+    interior_bg, kept = interior_pockets(dist, ff == 2, crop_lab, outer_th, inner_th,
+                                         args.min_hole, args.min_outlined_hole, args.outline_L)
+    print(f"interior pockets made transparent (x, y, area): {kept}")
     fg_mask = ((ff != 2) & (~interior_bg)).astype(np.uint8)
 
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(fg_mask, connectivity=8)

@@ -8,7 +8,7 @@
 
 1. ComfyUI の `--base-directory` 配下に `custom_nodes`, `models`, `user`, `input`, `output`, `temp` を作ってから起動し、[step0_generate_ply.py](../scripts/step0_generate_ply.py) で 2〜4 シードを生成する（標準 `65,536` 点。細密・高頭身キャラは `262,144` 点。[character_conditions.md](./character_conditions.md)）。
 2. 各シードを [step0_inspect_ply.py](../scripts/step0_inspect_ply.py) → [step1_normalize.py](../scripts/step1_normalize.py) で正規化する（直立・Z-up・-Y 正面・高さ `1.0`・`nan_or_inf == 0`）。数値で落ちたシードはレンダーしない。
-3. 残ったシードを固定の撮影セット（全身 `0° / 90° / 180°`、顔 `0° / +60°`）で撮り、[make_sheet.py](../scripts/make_sheet.py) で `seeds_sheet.png` 1 枚にまとめて比べる。
+3. 残ったシードを固定の撮影セット（全身 `0° / 90° / 180°`、顔 `0° / +60°`。[render_views.py](../scripts/render_views.py)、2 体目以降は `--ref` に 1 体目を渡して同じ尺度にする）で撮り、[make_sheet.py](../scripts/make_sheet.py) で `seeds_sheet.png` 1 枚にまとめて比べる。
 4. **細部ではなく、姿勢・正面の比率・顔と頭の厚み・背面の破綻の少なさで選ぶ。** 細部はプロシージャルに直せるが、姿勢・厚み・比率の崩れは段階 3 の修正回数を大きく増やす。[check_candidate.py](../scripts/check_candidate.py) の真横の傾き・浮遊点も判断材料にする。
 5. 選んだシードを `chosen.ply` として保存し、`choice.md` に候補ごとの一言と選んだ理由を書く。
 

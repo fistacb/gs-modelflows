@@ -14,9 +14,9 @@
 
 ## 手順
 
-1. [step0_prep_image.py](../scripts/step0_prep_image.py) で背景を透過し `front_rgba.png` を作る。外周の背景残り・足の間など閉じた空間の背景残り・明るい色のパーツの穴あきがないかを透過結果 1 枚で確認する（輪郭線で閉じた穴は、外周の塗りつぶしに加えて背景色の内部検出マスクで抜く。[package_v1_spec.md](./package_v1_spec.md) のトラブルシューティング）。
+1. [step0_prep_image.py](../scripts/step0_prep_image.py) で背景を透過し `front_rgba.png` を作る。背景がキャラの色に近い・背景にグラデーションや影がある・白い服に白背景・細い髪などで色の切り抜きが崩れるときは、[step0_matte_comfy.py](../scripts/step0_matte_comfy.py)（ComfyUI の BiRefNet）を使う。外周の背景残り・足の間など閉じた空間の背景残り・明るい色のパーツの穴あきがないかを透過結果 1 枚で確認する（腕と胴の間など背景色の閉じた穴は、大きいもの（`--min-hole`、既定 800 px）は常に、小さいもの（`--min-outlined-hole` 以上）は周りが暗い輪郭線のとき（`--outline-L`）だけ透過する。周りが明るい小さな穴はハイライト・宝石・白い服とみなして残す。透過した穴は実行時に一覧が出る）。
 2. [gate0_check_input.py](../scripts/gate0_check_input.py) で解像度・透過・顔幅・ポーズを検査する。FAIL なら段階 2 に進まない。
-3. 原画の目印（目・顎・肩・腰・裾・足首・髪先など、そのキャラで位置が読める部位）の高さを測り `landmarks.json` に残す。段階 3 のランドマーク高さの比較に使う。
+3. 原画の目印（目・顎・肩・腰・裾・足首・髪先など、そのキャラで位置が読める部位）の画素位置を読み、[measure_landmarks.py](../scripts/measure_landmarks.py) で高さ（靴底 0・頭頂 1）・輪郭の幅・`D_eye` を `landmarks.json` に残す（例: `--mark eye_l=402,286 --mark eye_r=470,286 --mark chin=330`）。段階 3 のランドマーク高さの比較に使う。
 4. [character_config.template.json](../resources/character_config.template.json) を作業フォルダへ `character_config.json` としてコピーし、キャラ条件（長い髪・マント・小物など）を書く。
 
 ## 確定の条件

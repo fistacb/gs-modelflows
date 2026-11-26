@@ -15,6 +15,21 @@ python scripts/check_candidate.py --cand 03_body/work/try3.ply --ref 02_gen/chos
 - 会話に返るのは 1 行の要約だけ。詳しい値は `<out>.json` に残る。
 - 変形は [splat_ops.py](../scripts/splat_ops.py) の `transform_gaussians` を使う（位置と一緒にガウスの向き・広がりを更新し、折り返す変形は `ValueError` で止まる）。キャラごとに変形器を書き直さない。
 
+### 標準の道具（キャラごとに書き直さない）
+
+| 道具 | 用途 |
+| :--- | :--- |
+| [render_views.py](../scripts/render_views.py) | 固定撮影セット（全身 `000 / p035 / m035 / p090 / p180`、バスト）。`--only full:90` で 1 角度だけ、`--ref <前の PLY>` で前後を同じカメラ・同じ尺度で撮る。 |
+| [correct_posture.py](../scripts/correct_posture.py) | 真横の前傾・後傾を線形シアーで取る（靴底は動かさず、首から上は剛体で移動）。報告に体幹の傾きの前後と足の移動量が出る。 |
+| [align_rows.py](../scripts/align_rows.py) | 目印の高さを原画に合わせる（高さ方向だけの単調な伸縮）。 |
+| [measure_landmarks.py](../scripts/measure_landmarks.py) | 原画・正面レンダーの目印の高さ、輪郭の幅、`D_eye` を測る。`--pairs-with` で `align_rows.py` 用の対応表を書く。 |
+| [remove_detached.py](../scripts/remove_detached.py) | 体につながっていない浮遊塊を除く。報告の塊（中心・大きさ）を見てから採用する。 |
+
+```
+python scripts/correct_posture.py --ply 02_gen/chosen.ply --out 03_body/work/posture.ply
+python scripts/render_views.py --ply 03_body/work/posture.ply --out qa/views/stage3/posture --only full:90 --ref 02_gen/chosen.ply
+```
+
 ## 2. 数値の検査が先、目視は後
 
 - 数値で落ちた候補はレンダーしない・見ない。
@@ -41,8 +56,10 @@ python scripts/check_candidate.py --cand 03_body/work/try3.ply --ref 02_gen/chos
 - **自分で画像を見るのは判断の場面だけ**（シードの選択、候補 2 つの比較、3 回で止まったときの方針決め、確定前の最終確認）。そのときは [make_sheet.py](../scripts/make_sheet.py) で 1 枚の縮小シート（長辺 1024 px 程度）にまとめてから見る。
 
   ```
-  python scripts/make_sheet.py --out qa/views/stage3/compare.png before.png:"before 90" after.png:"after 90"
+  python scripts/make_sheet.py --out qa/views/stage3/compare.png before_full_p090.png:"before 90" after_full_p090.png:"after 90"
   ```
+
+  `render_views.py` の出力名は `<out>_full_<角度>.png`（角度は `000`, `p035`, `m035`, `p090`, `p180`）。同じパスに上書きした画像は表示が古いまま残ることがあるので、撮り直しは新しいファイル名にする。
 
 - ユーザーへの画像報告は、確定時・3 回で止まったとき・方針の判断が要るときだけ。
 
