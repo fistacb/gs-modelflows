@@ -75,9 +75,13 @@ def install_global(target: str, force: bool = False) -> None:
                 print(f"[install] Skipped existing {dst} (pass --force to overwrite)")
                 continue
             copy_skill_tree(src, dst)
+            if (src / "scripts" / "render_views.py").exists() and (spark_dir / "capture.mjs").exists():
+                # global skills live outside the repo: ship the renderer next to the scripts
+                shutil.copytree(spark_dir, dst / "renderer" / "spark_demo", dirs_exist_ok=True,
+                                ignore=shutil.ignore_patterns("node_modules", "vendor", "out*"))
             installed += 1
         print(f"[install] Installed {installed}/{len(SKILL_NAMES)} skills for {label} -> {root_dir}")
-    print(f"[install] Tip: set GS_SPARK_DIR={spark_dir} so global skills can locate renderer/spark_demo.")
+    print(f"[install] Renderer copied into the installed skills; GS_SPARK_DIR={spark_dir} overrides it.")
 
 
 def main() -> None:

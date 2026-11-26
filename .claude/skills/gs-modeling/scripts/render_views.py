@@ -14,7 +14,8 @@ with the camera and the scale of the front views (units per pixel).
 Sets (quality_checklist.md section 1):
     full: 0 / +35 / -35 / 90 / 180      bust: 0 / +35 / -35 / +60 / 90
 
-Renderer: renderer/spark_demo (capture.mjs, capture.js, capture.html) copied into a
+Renderer: renderer/spark_demo (capture.mjs, capture.js, capture.html; found via GS_SPARK_DIR
+or a renderer/spark_demo folder above this script, which install_skills.py copies) copied into a
 temporary folder with the extended-covariance options turned on (covSplats, extSplats,
 sortRadial) so stretched splats are not shown as stripes. The three/spark vendor files
 come from --vendor or the SPARK_VENDOR environment variable.
@@ -38,8 +39,9 @@ sys.path.insert(0, str(SCRIPTS))
 
 from ply_io import read_ply, write_ply  # noqa: E402
 from splat_ops import opaque_xyz  # noqa: E402
+from config_loader import resolve_spark_dir  # noqa: E402
 
-RENDERER = SCRIPTS.parents[2] / "renderer" / "spark_demo"
+RENDERER = resolve_spark_dir()  # GS_SPARK_DIR, then renderer/spark_demo above this script
 DEFAULT_VENDOR = "C:/Users/chiro/Documents/Codex/2026-11-19/blender-three-js-spark-mp4-ply/vendor"
 SETS = {"full": [0, 35, -35, 90, 180], "bust": [0, 35, -35, 60, 90]}
 FOV = 3.0
