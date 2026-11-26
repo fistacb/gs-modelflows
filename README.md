@@ -5,7 +5,7 @@ English | [日本語](README.ja.md)
 Modular local **3D Gaussian Splatting (3DGS)** asset pipelines and **multi-agent skills** (compatible with **Antigravity**, **Claude Code**, and **OpenAI Codex**).
 
 Start from a single 2D reference image, build a clean rigged 3DGS character, and branch into:
-1. **3DGS Modeling & Rigging (`gs-modeling`)** — Single-image 3DGS generation (ComfyUI / TripoSplat), normalization, optional HD bust head transplant, dynamic doll eyes/eyelids, procedural lip-sync mouth, 22-bone Harmonic DQS rigging, and Spark GPU QA videos.
+1. **3DGS Modeling & Rigging (`gs-modeling`)** — Single-image 3DGS generation (ComfyUI / TripoSplat), normalization, multi-seed comparison, body cleanup, mandatory dynamic doll eyes/eyelids and procedural lip-sync mouth, 22-bone Harmonic DQS rigging, and Spark GPU QA videos.
 2. **2D / HD-2D Game Sprites (`gs-to-sprite`)** — Multi-angle transparent sprite sheets (`.png`) and animated `.gif` exports with dual-background exact alpha matting, telephoto/top-down framing, tinted 1px pixel outlines, and unified flicker-free palettes.
 3. **Watertight Mesh & Unified STL (`gs-to-mesh`)** — 3D Gaussian density field extraction, morphological solid filling, marching cubes, Blender voxel union (with optional miniature base), manifold/Z=0 validation, and 6-view clay comparison.
 

@@ -48,7 +48,7 @@ python scripts/check_candidate.py --cand 03_body/work/try3.ply --ref 02_gen/chos
 
 ## 4. 段階ごとに区切って引き継ぐ
 
-- 各段階は前の段階の**確定ファイル**だけを読む（フォルダ構成は `docs/restructure_plan.md` の B-2）。
+- 各段階は前の段階の**確定ファイル**だけを読む（フォルダ構成は [SKILL.md](../SKILL.md) の「作業フォルダ」）。
 - 段階を終えたら `qa/stage_<n>_handoff.md` を書く。次の段階はこれと確定ファイルだけで始められるようにし、長い作業はサブエージェントに 1 段階ずつ渡してよい（その場合も確定時の verify_gate・セルフチェック・独立 QA はその段階の中で済ませる）。
 
   ```markdown
