@@ -9,6 +9,38 @@ from config_loader import load_config
 SH_C0 = 0.28209479177387814
 
 
+def fit_eye_surface(xyz: np.ndarray, skin: np.ndarray, center: np.ndarray,
+                    radii: np.ndarray) -> float | None:
+    """Estimate the skin surface around one eye, excluding its opening."""
+    # Work in units of the socket radii. Include the outer rim and the cheek
+    # below it, then give each occupied cell similar weight despite splat density.
+    local = (xyz - center) / radii
+    x, y, z = local.T
+    samples = local[skin & (np.abs(x) <= 1.7) & (z >= -2.1) & (z <= 1.3)
+                    & (np.abs(y) <= 1.0) & (x*x + z*z >= 0.85**2)]
+    cells = np.floor(samples[:, [0, 2]] * 5).astype(int)
+    order = np.lexsort((cells[:, 1], cells[:, 0]))
+    splits = np.flatnonzero(np.any(np.diff(cells[order], axis=0), axis=1)) + 1
+    samples = np.array([np.median(group, axis=0) for group in np.split(samples[order], splits)
+                        if len(group) >= 2])
+    if len(samples) < 20:
+        return None
+    x, y, z = samples.T
+    if not (x.min() < -0.5 and x.max() > 0.5 and z.min() < -0.8 and z.max() > -0.25):
+        return None
+    matrix = np.column_stack((np.ones_like(x), x, z, x*x, x*z, z*z))
+    if np.linalg.cond(matrix) > 50:
+        return None
+    weights = np.ones_like(y)
+    for _ in range(4):
+        coefficients, *_ = np.linalg.lstsq(matrix * weights[:, None], y * weights, rcond=None)
+        error = np.abs(matrix @ coefficients - y)
+        weights = np.sqrt(np.minimum(1.0, 0.10 / np.maximum(error, 1e-6)))
+    if abs(coefficients[0]) > 0.35 or np.median(error) > 0.15:
+        return None
+    return float(center[1] + coefficients[0] * radii[1])
+
+
 def estimate_face_cx(xyz: np.ndarray, rgb: np.ndarray, prop: dict) -> float:
     """Estimate true face midline X from lower-face skin splats (immune to asymmetric side ponytails)."""
     lum = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
@@ -111,21 +143,24 @@ def main():
     eye_L = detect_eye(xyz, rgb, "eye_L", prop, face_cx_est)
     eye_R = detect_eye(xyz, rgb, "eye_R", prop, face_cx_est)
 
-    # Symmetrize eye_L / eye_R in Y, Z, cheek_yaw, and |X - face_cx| so Look-At vergence is strictly symmetric
+    # Fit each eye to its own opening. Look-at already uses each eye's origin.
     face_cx = 0.5 * (eye_L["surface_center"][0] + eye_R["surface_center"][0])
-    ex_half = 0.5 * (abs(eye_L["surface_center"][0] - face_cx) + abs(eye_R["surface_center"][0] - face_cx))
-    ez_sym = 0.5 * (eye_L["surface_center"][2] + eye_R["surface_center"][2])
-    sy_sym = 0.5 * (eye_L["surface_center"][1] + eye_R["surface_center"][1])
-    yaw_abs = 0.5 * (abs(eye_L["cheek_yaw_deg"]) + abs(eye_R["cheek_yaw_deg"]))
-    for ed, sgn in ((eye_L, +1.0), (eye_R, -1.0)):
-        r_e = float(ed["eyeball_radius"])
-        rad = float(np.radians(sgn * yaw_abs))
-        nx, ny = float(np.sin(rad)), -float(np.cos(rad))
-        sc = [float(face_cx + sgn * ex_half), float(sy_sym), float(ez_sym)]
-        ed["cheek_yaw_deg"] = float(sgn * yaw_abs)
-        ed["surface_center"] = sc
-        ed["eyeball_center"] = [float(sc[0] - nx * r_e), float(sc[1] - ny * r_e), float(ez_sym)]
-        ed["carve_center"] = [sc[0], float(sy_sym + r_e * 0.10), float(ez_sym)]
+    red, green, blue = rgb.T
+    skin = (red > 0.76) & (green > 0.56) & (green > blue + 0.015) & (red > green + 0.018)
+    skin &= d["opacity"] > 0
+    for name, eye in (("eye_L", eye_L), ("eye_R", eye_R)):
+        surface = eye["surface_center"]
+        detected_y = surface[1]
+        radii = np.asarray(eye["exclusion_radius"])
+        fitted_y = fit_eye_surface(xyz, skin, np.asarray(surface), radii)
+        eye["depth_fit"] = {"detected_y": detected_y, "skin_surface_y": fitted_y}
+        if fitted_y is None:
+            print(f"{name}: insufficient local skin support; review detected depth before carving")
+            continue
+        # Keep the carve centered on the baked iris splats in the original opening.
+        # Align the globe's forward pole with the fitted skin, even when gaze moves.
+        surface[1] = fitted_y
+        eye["eyeball_center"][1] = fitted_y + eye["eyeball_radius"]
     fz0, fz1 = float(prop["face_z_range"][0]), float(prop["face_z_range"][1])
     neck_z0 = float(prop["neck_z_range"][0])
     # Exclude rear ponytail/cape when estimating torso/head Y depth
