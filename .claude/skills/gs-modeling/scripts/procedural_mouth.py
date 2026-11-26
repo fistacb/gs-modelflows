@@ -112,12 +112,27 @@ def detect_mouth_landmarks(
         rx_mouth = float(0.165 * D_eye)
         lip_rgb = np.clip(skin_rgb * 0.42, 0.10, 0.45).astype(np.float32)
 
+    # Clamp mz safely inside measured chin-to-eye span (prevents chibi mouth dropping below chin into neck)
+    m_chin_skin = (
+        (op > 0.30)
+        & (np.abs(xyz[:, 0] - face_cx) < 0.45 * D_eye)
+        & (xyz[:, 2] > z_eye - 1.15 * D_eye) & (xyz[:, 2] < z_eye - 0.12 * D_eye)
+        & (xyz[:, 1] < sy + 0.65 * r_eye)
+        & (lum >= skin_lum * 0.82) & (rgb[:, 0] > rgb[:, 2] + 0.03)
+    )
+    if int(m_chin_skin.sum()) >= 20:
+        z_chin = float(np.percentile(xyz[m_chin_skin, 2], 4))
+        mz_lo = z_chin + 0.22 * max(z_eye - z_chin, 0.01)
+        mz_hi = z_eye - 0.32 * D_eye
+        if mz_lo < mz_hi:
+            mz = float(np.clip(mz, mz_lo, mz_hi))
+
     # Refine skin color right around detected mouth center using relative brightness
     m_skin = (
         (op > 0.30)
         & (np.abs(xyz[:, 0] - mx) < 0.55 * D_eye)
         & (np.abs(xyz[:, 2] - mz) < 0.28 * D_eye)
-        & (xyz[:, 1] < sy + 0.25 * r_eye)
+        & (xyz[:, 1] < sy + 0.65 * r_eye)
         & (lum >= skin_lum * 0.86)
     )
     if int(m_skin.sum()) >= 20:
@@ -125,16 +140,16 @@ def detect_mouth_landmarks(
         skin_lum = float(0.299 * skin_rgb[0] + 0.587 * skin_rgb[1] + 0.114 * skin_rgb[2])
 
     # Fit frontmost skin surface y_surf(dx, dz) = y0 + ky * dx^2 + kz * dz
-    # Use the actual frontmost envelope (p18) so the mouth sits 100% flush on the 3D lip surface (never recessed/floating)
+    # Use the actual frontmost envelope (p15) so the mouth sits 100% flush on the 3D lip surface (never recessed/floating)
     m_surf = (
         (op > 0.35)
         & (np.abs(xyz[:, 0] - mx) < 0.34 * D_eye)
         & (np.abs(xyz[:, 2] - mz) < 0.18 * D_eye)
-        & (xyz[:, 1] < sy + 0.25 * r_eye)
+        & (xyz[:, 1] < sy + 0.65 * r_eye)
     )
     if int(m_surf.sum()) >= 20:
         ps = xyz[m_surf]
-        y_cut = float(np.percentile(ps[:, 1], 22))
+        y_cut = float(np.percentile(ps[:, 1], 18))
         pf = ps[ps[:, 1] <= y_cut]
         if len(pf) < 10:
             pf = ps
@@ -142,7 +157,7 @@ def detect_mouth_landmarks(
         dz = pf[:, 2] - mz
         A = np.column_stack([np.ones_like(dx), dx * dx, dz])
         coef, *_ = np.linalg.lstsq(A, pf[:, 1], rcond=None)
-        y0 = float(coef[0])
+        y0 = float(coef[0]) - 0.0012
         ky = float(np.clip(coef[1], 10.0, 120.0))
         kz = float(np.clip(coef[2], -0.45, 0.45))
     else:

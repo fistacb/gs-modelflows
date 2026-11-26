@@ -183,8 +183,21 @@ def main():
     )
     skin_xyz = body_xyz[skin_mask]
     skin_fdc = body_fdc[skin_mask]
-    med_skin_fdc = np.median(skin_fdc, axis=0, keepdims=True).astype(np.float32)
-    skin_fdc = (0.35 * skin_fdc + 0.65 * med_skin_fdc).astype(np.float32)
+    # Sample pure cheek skin strictly below eyes with warm R > B hue so white/pink bangs never contaminate eyelid color
+    pure_cheek = (
+        (body_op > 0.30)
+        & (np.abs(body_xyz[:, 0] - face_cx) < 0.65 * D_eye)
+        & (body_xyz[:, 2] > z_eye - 0.55 * D_eye) & (body_xyz[:, 2] < z_eye - 0.14 * D_eye)
+        & (body_xyz[:, 1] < sy + 0.025)
+        & (body_rgb[:, 0] > body_rgb[:, 2] + 0.07)
+        & (lum > skin_lum * 0.85)
+    )
+    if pure_cheek.sum() >= 10:
+        pure_fdc = ((np.median(body_rgb[pure_cheek], axis=0).astype(np.float32) - 0.5) / SH_C0)[None, :]
+        skin_fdc = np.broadcast_to(pure_fdc, skin_fdc.shape).copy()
+    else:
+        med_skin_fdc = np.median(skin_fdc, axis=0, keepdims=True).astype(np.float32)
+        skin_fdc = (0.35 * skin_fdc + 0.65 * med_skin_fdc).astype(np.float32)
     skin_scale_med = float(np.median(head_pol_mouth["scale_0"][skin_mask]))
     rx_e, rz_e = max(eyeball_r * 1.48, 0.42 * D_eye), max(eyeball_r * 1.28, 0.36 * D_eye)
     dz_cap_L = detect_lash_ceiling_dz(body_xyz, body_rgb, np.ones(n_body, dtype=bool), surf_L, rx_e, rz_e)
@@ -208,9 +221,15 @@ def main():
     rem_rot /= np.maximum(np.linalg.norm(rem_rot, axis=1, keepdims=True), 1e-8)
     write_ply(anim_dir / "rest_eyes_mouth.ply", to_spark_ply(rest_eyes_mouth, rem_xyz, rem_rot))
 
-    cam_face = {"width": 640, "height": 640, "background": "#262a36", "target": [0.0, -float(z_eye - 0.015), 0.0], "pitch": 0, "fov": 24, "distance": 0.78, "front": 0, "side": 35}
-    cam_sh = {"width": 640, "height": 640, "background": "#262a36", "target": [0.0, -0.74, 0.0], "pitch": 3, "fov": 25, "distance": 1.38, "front": 30, "side": 90}
-    cam_loco = {"width": 640, "height": 640, "background": "#262a36", "target": [0.0, -0.56, 0.0], "pitch": 4, "fov": 28, "distance": 2.75, "front": 35, "side": 90}
+    # Auto-adapt camera distance & target to actual head/hat top Z so hair ornaments/hats never clip top border
+    z_top_head = float(np.percentile(body_xyz[op_body, 2], 99.8))
+    head_headroom = max(z_top_head - z_eye, 0.08)
+    dist_face = max(0.78, float(head_headroom * 6.4))
+    cam_face = {"width": 640, "height": 640, "background": "#262a36", "target": [float(face_cx), -float(z_eye + head_headroom * 0.08), 0.0], "pitch": 0, "fov": 26, "distance": round(dist_face, 3), "front": 0, "side": 35}
+    dist_sh = max(1.38, float((z_top_head - 0.55) * 3.5))
+    cam_sh = {"width": 640, "height": 640, "background": "#262a36", "target": [float(face_cx), -float(0.5 * (z_top_head + 0.48)), 0.0], "pitch": 3, "fov": 26, "distance": round(dist_sh, 3), "front": 30, "side": 90}
+    dist_loco = max(2.85, float(z_top_head * 3.05))
+    cam_loco = {"width": 640, "height": 640, "background": "#262a36", "target": [0.0, -float(z_top_head * 0.58), 0.0], "pitch": 4, "fov": 28, "distance": round(dist_loco, 3), "front": 35, "side": 90}
 
     anim_frames = []
     t_prep0 = time.perf_counter()

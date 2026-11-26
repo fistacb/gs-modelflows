@@ -61,14 +61,36 @@ def main():
     rot = quat_mul_wxyz(q_R, rot)
     rot /= np.maximum(np.linalg.norm(rot, axis=1, keepdims=True), 1e-8)
 
-    # 2b. Pitch-lean correction (TripoSplat camera elevation bias leaves ~25-30 deg backward lean)
+    # 2b. Pitch-lean correction (TripoSplat camera elevation bias leaves backward lean)
+    # Prefer boot/foot sole plane slope (immune to long ponytails/capes shifting head centroid backward),
+    # with fallback to torso front-surface axis if foot sole span is too narrow.
     z_min_tmp, z_max_tmp = float(np.percentile(xyz[:, 2], 1)), float(np.percentile(xyz[:, 2], 99))
     h_tmp = z_max_tmp - z_min_tmp
-    m_feet = (xyz[:, 2] >= z_min_tmp + 0.02 * h_tmp) & (xyz[:, 2] <= z_min_tmp + 0.12 * h_tmp)
-    m_head = (xyz[:, 2] >= z_min_tmp + 0.65 * h_tmp) & (xyz[:, 2] <= z_min_tmp + 0.85 * h_tmp)
-    c_feet = np.median(xyz[m_feet], axis=0)
-    c_head = np.median(xyz[m_head], axis=0)
-    pitch_rad = float(np.arctan2(c_head[1] - c_feet[1], c_head[2] - c_feet[2]))
+    m_sole = (op_prob >= 0.25) & (xyz[:, 2] >= z_min_tmp - 0.01 * h_tmp) & (xyz[:, 2] <= z_min_tmp + 0.06 * h_tmp)
+    pitch_rad = None
+    if m_sole.sum() >= 30:
+        sy = xyz[m_sole, 1]
+        sz = xyz[m_sole, 2]
+        y0, y1 = float(np.percentile(sy, 5)), float(np.percentile(sy, 95))
+        if (y1 - y0) >= 0.04 * h_tmp:
+            ys_b, zs_b = [], []
+            for yb in np.linspace(y0, y1, 10):
+                mb = np.abs(sy - yb) < (y1 - y0) * 0.14
+                if mb.sum() >= 5:
+                    ys_b.append(float(np.median(sy[mb])))
+                    zs_b.append(float(np.percentile(sz[mb], 5)))
+            if len(ys_b) >= 4:
+                slope = float(np.polyfit(ys_b, zs_b, 1)[0])
+                # Positive slope (z increases with +y / heel higher) means leaning forward -> rotate by -atan(slope)
+                pitch_rad = float(np.clip(-np.arctan(slope), np.radians(-35.0), np.radians(35.0)))
+    if pitch_rad is None:
+        m_feet = (xyz[:, 2] >= z_min_tmp + 0.02 * h_tmp) & (xyz[:, 2] <= z_min_tmp + 0.12 * h_tmp)
+        m_head = (xyz[:, 2] >= z_min_tmp + 0.65 * h_tmp) & (xyz[:, 2] <= z_min_tmp + 0.85 * h_tmp)
+        c_feet = np.median(xyz[m_feet], axis=0)
+        # Use front-half median (y <= median_y) for head to reduce ponytail/cape bias
+        hy_med = float(np.median(xyz[m_head, 1]))
+        c_head = np.median(xyz[m_head & (xyz[:, 1] <= hy_med)], axis=0)
+        pitch_rad = float(np.clip(np.arctan2(c_head[1] - c_feet[1], c_head[2] - c_feet[2]), np.radians(-35.0), np.radians(35.0)))
     pitch_deg = float(np.degrees(pitch_rad))
     R_pitch = Rotation.from_euler("x", pitch_rad).as_matrix()
     q_p_xyzw = Rotation.from_matrix(R_pitch).as_quat()

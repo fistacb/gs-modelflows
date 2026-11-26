@@ -394,7 +394,14 @@ def main():
     legs = extract_leg_joints(xyz_no_arms, face_cx, z_crotch)
 
     # 3. Torso centerline joints (pelvis -> chest -> clav_base -> neck -> head)
-    torso_band = xyz_no_arms[(xyz_no_arms[:, 2] >= z_crotch) & (xyz_no_arms[:, 2] <= z_neck)]
+    # Exclude long rear ponytails/capes (+Y outliers) and wide arms/skirts (|x - face_cx| > 0.085)
+    torso_band = xyz_no_arms[
+        (xyz_no_arms[:, 2] >= z_crotch) & (xyz_no_arms[:, 2] <= z_neck)
+        & (np.abs(xyz_no_arms[:, 0] - face_cx) < 0.085)
+        & (xyz_no_arms[:, 1] < 0.06)
+    ]
+    if len(torso_band) < 50:
+        torso_band = xyz_no_arms[(xyz_no_arms[:, 2] >= z_crotch) & (xyz_no_arms[:, 2] <= z_neck)]
     def torso_pt(z_val: float) -> list[float]:
         c = slice_mid(torso_band, z_val, half_dz=0.020)
         return [face_cx, float(c[1]), float(z_val)]
@@ -407,7 +414,9 @@ def main():
     p_clav_base = torso_pt(z_clav_base)
     p_neck = torso_pt(z_neck)
 
-    head_pts = xyz_op[xyz_op[:, 2] >= z_neck]
+    head_pts = xyz_op[(xyz_op[:, 2] >= z_neck) & (np.abs(xyz_op[:, 0] - face_cx) < 0.095) & (xyz_op[:, 1] < 0.06)]
+    if len(head_pts) < 50:
+        head_pts = xyz_op[xyz_op[:, 2] >= z_neck]
     z_head_tail = z_neck + 0.62 * (z_top - z_neck)
     p_head_c = slice_mid(head_pts, z_head_tail, half_dz=0.022)
     p_head_tail = [face_cx, float(p_head_c[1]), float(z_head_tail)]

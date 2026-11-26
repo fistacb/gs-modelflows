@@ -13,7 +13,7 @@ def main():
     ap.add_argument("--config", default=None)
     ap.add_argument("--src", default=None)
     ap.add_argument("--dst", default=None)
-    ap.add_argument("--panels", type=int, default=4, help="Number of horizontal panels in design sheet (1 if single image)")
+    ap.add_argument("--panels", type=int, default=None, help="Number of horizontal panels in design sheet (auto-detected if omitted: 1 for single image, 4 for wide sheet)")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -26,9 +26,10 @@ def main():
     arr = np.array(im)
     h, w, _ = arr.shape
 
-    if args.panels > 1:
+    panels = args.panels if args.panels is not None else (1 if (w / max(h, 1)) < 1.35 else 4)
+    if panels > 1:
         col_mean = arr[: int(h * 0.85), :, :].mean(axis=(0, 2))
-        s0, s1 = int(w * (1.0 / args.panels - 0.03)), int(w * (1.0 / args.panels + 0.03))
+        s0, s1 = int(w * (1.0 / panels - 0.03)), int(w * (1.0 / panels + 0.03))
         divider_x = s0 + int(np.argmax(col_mean[s0:s1]))
         crop = arr[: int(h * 0.87), : divider_x - 3, :]
     else:
@@ -54,6 +55,10 @@ def main():
 
     outer_th = float(bg_cfg.get("lab_outer_thresh", 22.0))
     inner_th = float(bg_cfg.get("lab_interior_thresh", 26.0))
+    # Auto-tighten thresholds on bright white backgrounds to prevent holes in white hair/skin/clothes
+    if float(bg_rgb.min()) >= 235.0:
+        outer_th = min(outer_th, 14.0)
+        inner_th = min(inner_th, 4.0)
 
     # Flood-fill outer background + remove enclosed interior pockets matching background Lab color
     bg_cand = (dist < outer_th).astype(np.uint8)

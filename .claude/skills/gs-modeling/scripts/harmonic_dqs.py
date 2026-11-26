@@ -199,11 +199,20 @@ def compute_harmonic_skin_weights(
         dists[:, bi] = d
 
     # Segment outer arm cores via 3D CC + upper-arm cylinder (automatically adapts to T-pose & A-pose!)
+    # Restrict candidates to an arm-bone proximity tube so wide flare skirts near A-pose hands never merge into arm_core
     arm_core_L = np.zeros(nb, dtype=bool)
     arm_core_R = np.zeros(nb, dtype=bool)
     arm_cut_x = max(sh_hw + 0.045, sh_hw * 1.45)
     for side, sgn, mask_out in (("L", +1.0, arm_core_L), ("R", -1.0, arm_core_R)):
-        cand = np.where(((bxyz[:, 0] - face_cx) * sgn > arm_cut_x) & (bxyz[:, 2] >= arm_min_z) & (bxyz[:, 2] <= sh_z + 0.09))[0]
+        d_arm_side = np.full(nb, 1e6, dtype=np.float32)
+        for bn in (f"upper_arm_{side}", f"forearm_{side}", f"forearm_twist_{side}", f"hand_{side}"):
+            if bn in bones:
+                d_arm_side = np.minimum(d_arm_side, dist_to_segment(bxyz, np.asarray(bones[bn]["head"], np.float32), np.asarray(bones[bn]["tail"], np.float32)))
+        hand_tip = np.asarray(bones[f"hand_{side}"]["tail"], np.float32)
+        d_tip = np.linalg.norm(bxyz - hand_tip[None, :], axis=1)
+        # Tight fingertip capture (0.075) while excluding low skirt petals below the hand
+        near_arm_tube = ((d_arm_side <= 0.056) & (bxyz[:, 2] >= hip_z + 0.025)) | (d_arm_side <= 0.042) | ((d_tip <= 0.075) & (bxyz[:, 2] >= hand_tip[2] - 0.025))
+        cand = np.where(((bxyz[:, 0] - face_cx) * sgn > arm_cut_x) & (bxyz[:, 2] >= arm_min_z) & (bxyz[:, 2] <= sh_z + 0.09) & near_arm_tube)[0]
         if len(cand) >= 20:
             cxyz = bxyz[cand]
             adj_c = cKDTree(cxyz).sparse_distance_matrix(cKDTree(cxyz), max_distance=0.016, output_type="coo_matrix")
@@ -223,12 +232,35 @@ def compute_harmonic_skin_weights(
 
     head_joint_z = float(bones["head"]["head"][2])
     armpit_z = sh_z - 0.068
+
+    # Auto-detect hanging long hair / ponytail / side-tail below head_joint_z via 3D CC from cranium
+    # (rear y > torso_back_y or lateral outside shoulders, strictly excluding arms & front torso)
+    torso_y_c = float(bones["chest"]["head"][1])
+    hair_cand_mask = (
+        (bxyz[:, 2] > head_joint_z + 0.004)
+        | (
+            (bxyz[:, 2] >= max(hip_z + 0.08, head_joint_z - 0.22))
+            & (bxyz[:, 2] <= head_joint_z + 0.015)
+            & (~(arm_core_L | arm_core_R))
+            & ((bxyz[:, 1] > torso_y_c + 0.055) | (np.abs(bxyz[:, 0] - face_cx) > sh_hw + 0.065))
+        )
+    )
+    hanging_hair = np.zeros(nb, dtype=bool)
+    hc_idx = np.where(hair_cand_mask)[0]
+    if len(hc_idx) >= 50:
+        hc_xyz = bxyz[hc_idx]
+        adj_h = cKDTree(hc_xyz).sparse_distance_matrix(cKDTree(hc_xyz), max_distance=0.020, output_type="coo_matrix")
+        _, h_labels = connected_components(adj_h, directed=False)
+        top_seed = int(np.argmax(hc_xyz[:, 2]))
+        hanging_hair[hc_idx[h_labels == h_labels[top_seed]]] = True
+
     torso_core = (
         ((np.abs(bxyz[:, 0] - face_cx) < sh_hw * 1.05) & (bxyz[:, 2] >= hip_z - 0.02) & (bxyz[:, 2] <= neck_z + 0.02))
         | ((np.abs(bxyz[:, 0] - face_cx) < sh_hw + 0.024) & (bxyz[:, 2] >= hip_z - 0.02) & (bxyz[:, 2] <= armpit_z))
-    ) & ~(arm_core_L | arm_core_R)
-    waist_core = (np.abs(bxyz[:, 0] - face_cx) < sh_hw + 0.050) & (bxyz[:, 2] >= hip_z - 0.02) & (bxyz[:, 2] <= armpit_z - 0.065) & ~(arm_core_L | arm_core_R)
-    head_core = bxyz[:, 2] > head_joint_z + 0.004
+    ) & ~(arm_core_L | arm_core_R | hanging_hair)
+    # Pin ALL non-arm points in the waist/flare-skirt zone so arm weights never bleed into wide skirts during heat diffusion
+    waist_core = (bxyz[:, 2] >= hip_z - 0.02) & (bxyz[:, 2] <= armpit_z - 0.045) & ~(arm_core_L | arm_core_R | hanging_hair)
+    head_core = (bxyz[:, 2] > head_joint_z + 0.004) | hanging_hair
     leg_core = (bxyz[:, 2] < hip_z - 0.02) & ~(arm_core_L | arm_core_R)
 
     pinned = torso_core | waist_core | arm_core_L | arm_core_R | head_core | leg_core
@@ -253,11 +285,16 @@ def compute_harmonic_skin_weights(
     for _ in range(n_harmonic_iters):
         W_b[free] = (P @ W_b)[free]
 
-    # Smooth transitions across joints while keeping the rigid cranium (face, eyes, mouth, hair, hat) locked to head=1.0
-    rigid_cranium = bxyz[:, 2] > head_joint_z + 0.012
+    # Smooth transitions across joints while keeping the rigid cranium + connected long hair locked to head=1.0
+    # and preventing final smoothing pass from bleeding arm weights into the pinned skirt/legs
+    rigid_cranium = (bxyz[:, 2] > head_joint_z + 0.012) | hanging_hair
+    skirt_or_leg = (waist_core | leg_core) & (~(arm_core_L | arm_core_R))
     has_nbr = (deg > 1e-8) & (~rigid_cranium)
     for _ in range(n_smooth_iters):
         W_b[has_nbr] = 0.55 * W_b[has_nbr] + 0.45 * (P @ W_b)[has_nbr]
+        if np.any(skirt_or_leg):
+            W_b[np.ix_(skirt_or_leg, is_arm_b_L | is_arm_b_R)] = 0.0
+            W_b[skirt_or_leg] /= np.maximum(W_b[skirt_or_leg].sum(axis=1, keepdims=True), 1e-8)
     if np.any(is_head_b) and np.any(rigid_cranium):
         W_b[rigid_cranium] = 0.0
         W_b[rigid_cranium, np.where(is_head_b)[0][0]] = 1.0

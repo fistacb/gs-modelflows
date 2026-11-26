@@ -79,7 +79,7 @@ def derive_iris_palette(cfg_colors: dict, src_ply: Path | None, skel: dict) -> d
     return pal
 
 
-def build_eyeball_ply(radius: float, sclera_rgb: np.ndarray, pal: dict, n_back: int = 1400, n_front: int = 3600, white_only: bool = False) -> np.ndarray:
+def build_eyeball_ply(radius: float, sclera_rgb: np.ndarray, pal: dict, n_back: int = 1400, n_front: int = 3600, white_only: bool = False, cheek_yaw_deg: float = 0.0) -> np.ndarray:
     n_full = fibonacci_sphere(n_back)
     n_b = n_full[n_full[:, 1] > -float(np.cos(np.radians(70.0)))]
     n_f = fibonacci_front_cap(n_front, max_angle_deg=72.0)
@@ -97,7 +97,8 @@ def build_eyeball_ply(radius: float, sclera_rgb: np.ndarray, pal: dict, n_back: 
     scale = np.column_stack([np.log(r_disc), np.log(r_disc), np.log(r_disc * 0.25)]).astype(np.float32)
 
     front_y = np.maximum(-normals[:, 1], 1e-5)
-    ax = np.degrees(np.arctan2(normals[:, 0], front_y))
+    # Offset iris center by cheek_yaw_deg so eyeball hugs curved cheek while gaze faces straight forward (-Y)
+    ax = np.degrees(np.arctan2(normals[:, 0], front_y)) - float(cheek_yaw_deg)
     az = np.degrees(np.arctan2(normals[:, 2], front_y))
     is_front = normals[:, 1] < 0.0
 
@@ -131,6 +132,11 @@ def build_eyeball_ply(radius: float, sclera_rgb: np.ndarray, pal: dict, n_back: 
             w_hl = (1.0 - smoothstep(r0, r1, np.hypot(ax - hx, az - hz))) * is_front.astype(np.float32)
             rgb = rgb * (1.0 - w_hl[:, None]) + np.array(col, dtype=np.float32)[None, :] * w_hl[:, None]
 
+    # Trim rear hemisphere splats so oblique views (+60 deg) never poke through cheek/temple
+    keep = (normals[:, 1] < -0.35) & (np.abs(ax) < 58.0) & (np.abs(az) < 52.0)
+    xyz, rgb, scale, rot = xyz[keep], rgb[keep], scale[keep], rot[keep]
+    n_kept = len(xyz)
+
     fdc = (np.clip(rgb, 0.0, 1.0) - 0.5) / SH_C0
     out_dtype = np.dtype([
         ("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4"),
@@ -138,10 +144,10 @@ def build_eyeball_ply(radius: float, sclera_rgb: np.ndarray, pal: dict, n_back: 
         ("scale_0", "<f4"), ("scale_1", "<f4"), ("scale_2", "<f4"),
         ("rot_0", "<f4"), ("rot_1", "<f4"), ("rot_2", "<f4"), ("rot_3", "<f4"),
     ])
-    out = np.zeros(n_total, dtype=out_dtype)
+    out = np.zeros(n_kept, dtype=out_dtype)
     out["x"], out["y"], out["z"] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
     out["f_dc_0"], out["f_dc_1"], out["f_dc_2"] = fdc[:, 0], fdc[:, 1], fdc[:, 2]
-    out["opacity"] = np.full(n_total, 6.0, dtype=np.float32)
+    out["opacity"] = np.full(n_kept, 7.5, dtype=np.float32)
     out["scale_0"], out["scale_1"], out["scale_2"] = scale[:, 0], scale[:, 1], scale[:, 2]
     out["rot_0"], out["rot_1"], out["rot_2"], out["rot_3"] = rot[:, 0], rot[:, 1], rot[:, 2], rot[:, 3]
     return out
@@ -171,8 +177,10 @@ def main():
 
     suffix = "_white" if args.white_only else ""
     for eye_name in ("eye_L", "eye_R"):
-        r = float(skel["bones"][eye_name]["meta"]["eyeball_radius"])
-        arr = build_eyeball_ply(r, sclera_rgb, pal, white_only=args.white_only)
+        meta = skel["bones"][eye_name]["meta"]
+        r = float(meta["eyeball_radius"])
+        cyaw = float(meta.get("cheek_yaw_deg", 0.0))
+        arr = build_eyeball_ply(r, sclera_rgb, pal, white_only=args.white_only, cheek_yaw_deg=cyaw)
         out_path = out_dir / f"step4_{eye_name}{suffix}_local.ply"
         write_ply(out_path, arr)
         print(f"Saved {out_path} ({len(arr)} splats, r={r:.4f})")
