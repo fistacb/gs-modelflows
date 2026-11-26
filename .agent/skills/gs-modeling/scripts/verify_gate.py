@@ -8,6 +8,7 @@ Design principles:
 3. Two-layer verification contract:
    - Layer 1 (this script): Deterministic math/geometry/proportion gates:
        * Gate 1: NaN/Inf, splat count, normalized height, 3D isolated-floater detection,
+                 side-view trunk lean & sole tilt,
                  1:1 Design vs 3DGS front aspect-ratio (anti-stretch) & silhouette overlay.
        * Gate 2: 1:1 Bust Design vs 3DGS proportion/anti-stretch check & 50/50 overlay,
                  3D floater check, Before/After eye regression sheet (bust-cropped design).
@@ -35,6 +36,7 @@ from scipy.spatial import cKDTree
 SKILL_SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SKILL_SCRIPTS))
 from ply_io import read_ply
+from splat_ops import trunk_lean_deg, sole_tilt_deg
 
 VALIDATOR_VERSION = "3.0"
 DEFAULT_BLENDER = Path(os.environ.get("GS_BLENDER_BIN") or shutil.which("blender") or "blender")
@@ -255,6 +257,23 @@ def run_gate1(args) -> int:
             f"({floater_stats['isolated_ratio']*100:.2f}% > 0.50%)"
         )
 
+    # Side-view (90 deg) posture: trunk lean and sole tilt. Measured BEFORE any render review,
+    # because a leaning body is easy to miss in front views (snowdrop: 17 deg back lean passed visually).
+    cfg = json.loads(Path(args.config).read_text(encoding="utf-8")) if args.config else {}
+    qa_cfg = cfg.get("qa_thresholds", {})
+    max_lean = float(qa_cfg.get("max_trunk_lean_deg", args.max_lean_deg))
+    max_sole = float(qa_cfg.get("max_sole_tilt_deg", args.max_sole_tilt_deg))
+    xyz_op = xyz[op > 0.15].astype(np.float64)
+    lean = trunk_lean_deg(xyz_op)
+    sole = sole_tilt_deg(xyz_op)
+    posture = {"trunk_lean_deg": round(lean, 2), "sole_tilt_deg": round(sole, 2),
+               "max_trunk_lean_deg": max_lean, "max_sole_tilt_deg": max_sole,
+               "sign": "+ = top leans back (+Y), - = forward"}
+    if np.isfinite(lean) and abs(lean) > max_lean:
+        failures.append(f"Side-view trunk lean {lean:+.1f} deg exceeds +/-{max_lean:.1f} deg (fix posture before visual review)")
+    if np.isfinite(sole) and abs(sole) > max_sole:
+        failures.append(f"Sole tilt {sole:+.1f} deg exceeds +/-{max_sole:.1f} deg (soles not level in side view)")
+
     # Build standardized Gate 1 evidence sheet (Design Reference | 3DGS 4-View)
     evidence_path = out_dir / "gate1_evidence_sheet.png"
     if args.design and args.render_4view:
@@ -302,6 +321,7 @@ def run_gate1(args) -> int:
             "nan_or_inf_total": nan_inf,
             "height_span": round(height, 4),
             "floaters": floater_stats,
+            "posture_side_view": posture,
             "design_1to1_match": design_match,
         },
         "evidence_image": str(evidence_path) if evidence_path.exists() else None,
@@ -698,6 +718,8 @@ def main():
     ap.add_argument("--render-4view", default=None, help="Gate 1 4-view render image")
     ap.add_argument("--render-front", default=None, help="Front render (full-body for Gate 1, bust for Gate 2) for 1:1 design overlay & anti-stretch check")
     ap.add_argument("--max-stretch-pct", type=float, default=10.0, help="Max allowed vertical stretch/squash %% vs design (default: 10.0)")
+    ap.add_argument("--max-lean-deg", type=float, default=8.0, help="Gate 1 max side-view trunk lean in degrees (config qa_thresholds.max_trunk_lean_deg overrides)")
+    ap.add_argument("--max-sole-tilt-deg", type=float, default=3.0, help="Gate 1 max sole tilt in degrees (config qa_thresholds.max_sole_tilt_deg overrides)")
     ap.add_argument("--bust-top-frac", type=float, default=0.27, help="Top foreground fraction of design used for bust 1:1 crop (default: 0.27)")
     # Gate 2 args
     ap.add_argument("--before-face", default=None, help="Gate 1 static face close-up (BEFORE)")

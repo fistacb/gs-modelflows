@@ -60,6 +60,8 @@
     "max_eyelid_hair_overlap": 0.02,
     "max_foot_ground_err": 0.005,
     "min_elbow_down_back_dot": 0.70,
-    "min_palm_camera_dot": 0.80
+    "min_palm_camera_dot": 0.80,
+    "max_trunk_lean_deg": 8.0,
+    "max_sole_tilt_deg": 3.0
   }
 }
