@@ -22,7 +22,7 @@ description: >-
    - `volumes`: 立体構造物（`platform` テラス、`overpass` 高架橋、`ramp` 階段スロープ、`pillar` 柱）。**2.5D の単一ハイトマップではなく多層 3D スパン（`spans[iy][ix]`）としてコンパイル**するため、同じ `(x, y)` に 1 階（高架下）と 2 階（石橋）が上書きされず共存する。
    - `props`: `gs-modeling`（`mode: static_prop`）で作った独立 `v1_prop/` の配置先（`layer` 指定で 1 階・2 階それぞれの床へ自動接地）。
    - `lights`: 環境・点光源アンカー。
-2. **テーマ（`theme.json`）**: スプラット外観・石積み目地・苔の馴染ませ・大気（霧・光の粒）・ライティングのルール集。**同一の `frame.json` に別の `theme.json` を差し替えるだけで構造を保ったまま別景観へ切り替え可能**。
+2. **テーマ（`theme.json`）**: スプラット外観・石積みスタイル（`masonry.style`: `irregular_ruin` 乱積み ／ `crisp_brick` パキパキレンガ ／ `ashlar_cut` 切石神殿、`stone_jitter`, `moss_amount`, `floor_wall_contrast`）・苔の馴染ませ・大気（霧・木漏れ日・光の粒）・ライティングのルール集。**同一の `frame.json` に別の `theme.json` を差し替えるだけで構造を保ったまま別景観へ切り替え可能**。
 3. **3D 歩行可能フロア ＆ 経路計画（`volumetric_frame_3d.py`）**:
    - 各セルの多層スパンに対し、`abs(z_next - z_cur) <= max_step_height`（既定 `0.36m`）かつ頭上クリアランス `>= 1.55m` の隣接のみ接続する **真の 3D A\*（`(ix, iy, span_idx)`）** を実行。
    - 動画生成時の 22 ボーン Harmonic DQS 歩行（勾配前傾・階段膝上げ・立体交差）と、2D/HD-2D ゲームのスプライト接地・前後ソート・足音種別判定の両方に共通の指標として使える。

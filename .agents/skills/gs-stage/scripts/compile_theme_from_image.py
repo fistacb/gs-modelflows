@@ -120,6 +120,12 @@ def build_theme_json(name: str, title: str, source_image: Path, pal: dict[str, l
             "stairs":       {"base_rgb": mix(pal["stone_gray"], pal["sunbeam_cream"], 0.30), "alt_rgb": pal["stone_gray"]},
             "moss":         {"base_rgb": pal["meadow_green"], "alt_rgb": pal["sunlit_moss"]},
         },
+        "masonry": {
+            "style": "irregular_ruin",
+            "stone_jitter": 0.34,
+            "moss_amount": 0.60,
+            "floor_wall_contrast": 1.22,
+        },
         "overhang_moss": {
             "rgb_a": pal["meadow_green"],
             "rgb_b": pal["sunlit_moss"],

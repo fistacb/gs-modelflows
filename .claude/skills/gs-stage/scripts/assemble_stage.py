@@ -90,78 +90,174 @@ def shade_splats(xyz: np.ndarray, rgb: np.ndarray, frame: dict, theme: dict, nor
     return np.clip(out / (1.0 + 0.22 * np.maximum(out - 0.80, 0.0)), 0.0, 1.0)
 
 
+def _hash2(ix: np.ndarray, iy: np.ndarray) -> np.ndarray:
+    n = np.sin(ix * 127.1 + iy * 311.7) * 43758.5453123
+    return (n - np.floor(n)).astype(np.float32)
+
+
+def _value_noise_2d(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    ix, iy = np.floor(x), np.floor(y)
+    fx, fy = x - ix, y - iy
+    ux, uy = fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy)
+    return (_hash2(ix, iy) * (1 - ux) + _hash2(ix + 1, iy) * ux) * (1 - uy) + (
+        _hash2(ix, iy + 1) * (1 - ux) + _hash2(ix + 1, iy + 1) * ux
+    ) * uy
+
+
+def _fbm2(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    return (
+        0.55 * _value_noise_2d(x, y)
+        + 0.30 * _value_noise_2d(x * 2.13 + 7.1, y * 2.13 - 3.4)
+        + 0.15 * _value_noise_2d(x * 4.37 - 1.9, y * 4.37 + 5.2)
+    ).astype(np.float32)
+
+
+def _voronoi_stone_field(u: np.ndarray, v: np.ndarray, scale_u: float, scale_v: float, jitter: float):
+    su, sv = u * scale_u, v * scale_v
+    iu, iv = np.floor(su), np.floor(sv)
+    d1 = np.full_like(su, 1e9, dtype=np.float32)
+    d2 = np.full_like(su, 1e9, dtype=np.float32)
+    cid = np.zeros_like(su, dtype=np.float32)
+    best_dv = np.zeros_like(su, dtype=np.float32)
+    for du in (-1, 0, 1):
+        for dv in (-1, 0, 1):
+            nu, nv = iu + du, iv + dv
+            stagger = (nv % 2) * 0.42
+            rx = nu + 0.5 + (_hash2(nu, nv) - 0.5) * jitter * 2.0 + (stagger - 0.21) * 0.35
+            ry = nv + 0.5 + (_hash2(nu + 19.3, nv + 7.7) - 0.5) * jitter * 1.4
+            dist = np.hypot(su - rx, sv - ry)
+            closer = dist < d1
+            d2 = np.where(closer, d1, np.minimum(d2, dist))
+            d1 = np.where(closer, dist, d1)
+            cid = np.where(closer, _hash2(nu * 3.1, nv * 5.7), cid)
+            best_dv = np.where(closer, sv - ry, best_dv)
+    return np.clip(d2 - d1, 0.0, 1.0), cid, best_dv
+
+
 def synth_stone_box(cx, cy, z0, z1, hx, hy, step, rng, surf_top, surf_wall, moss_rgb, frame, theme, dtype, arch_camber=0.0):
+    """Synthesize theme-controlled stonework: supports irregular_ruin (Voronoi), crisp_brick, and ashlar_cut
+    with strong floor-vs-wall value separation, stone coping curb, and base/lip contact AO.
+    """
     pts, cols, scs, nrms = [], [], [], []
+    mcfg = theme.get("masonry", {})
+    style = mcfg.get("style", "irregular_ruin")
+    jitter = float(mcfg.get("stone_jitter", 0.0 if style == "crisp_brick" else (0.10 if style == "ashlar_cut" else 0.32)))
+    moss_amt = float(mcfg.get("moss_amount", 0.08 if style == "crisp_brick" else 0.55))
+    floor_gain = float(mcfg.get("floor_wall_contrast", 1.20))
+
     c_top0, c_top1 = np.array(surf_top["base_rgb"], np.float32), np.array(surf_top["alt_rgb"], np.float32)
     c_w0, c_w1 = np.array(surf_wall["base_rgb"], np.float32), np.array(surf_wall["alt_rgb"], np.float32)
     c_m0, c_m1 = np.array(moss_rgb["base_rgb"], np.float32), np.array(moss_rgb["alt_rgb"], np.float32)
-    c_mort = np.array(theme["surfaces"].get("mortar", {}).get("base_rgb", [0.16, 0.19, 0.17]), np.float32)
+    c_mort = np.array(theme["surfaces"].get("mortar", {}).get("base_rgb", [0.22, 0.19, 0.17]), np.float32)
+    c_cream = np.array(theme.get("palette", {}).get("sunbeam_cream", [0.96, 0.90, 0.76]), np.float32)
 
-    xs = np.arange(-hx, hx + 1e-4, step * 0.85, dtype=np.float32)
-    ys = np.arange(-hy, hy + 1e-4, step * 0.85, dtype=np.float32)
+    # 1. Walkable Top Deck (bright, warm sunlit flagstones + crisp raised coping trim)
+    s_top = step * 0.76
+    xs = np.arange(-hx, hx + 1e-4, s_top, dtype=np.float32)
+    ys = np.arange(-hy, hy + 1e-4, s_top, dtype=np.float32)
     gx, gy = np.meshgrid(xs, ys)
     gx, gy = gx.ravel(), gy.ravel()
+    if jitter > 0.05:
+        gx = gx + rng.uniform(-s_top * 0.22, s_top * 0.22, len(gx)).astype(np.float32)
+        gy = gy + rng.uniform(-s_top * 0.22, s_top * 0.22, len(gy)).astype(np.float32)
+    wx, wy = gx + cx, gy + cy
     cam = arch_camber * (1.0 - (gx / max(hx, 1e-4)) ** 2)
+    grain = _fbm2(wx * 5.0, wy * 5.0)
 
-    row_i = np.floor((gy + cy) / 0.42)
-    col_u = ((gx + cx) + (row_i % 2) * 0.24) / 0.48
-    row_v = (gy + cy) / 0.42
-    fu, fv = col_u - np.floor(col_u), row_v - np.floor(row_v)
-    is_joint = (fu < 0.09) | (fu > 0.91) | (fv < 0.09) | (fv > 0.91)
-    blk_h = ((np.floor(col_u) * 17.3 + row_i * 31.7) % 1.0).astype(np.float32)
+    if jitter > 0.05:
+        ed, cid, loc_v = _voronoi_stone_field(wx, wy, 1.85, 1.85, jitter)
+        is_joint = ed < 0.085
+        bevel = np.clip((ed - 0.085) / 0.14, 0.0, 1.0)
+    else:
+        ri = np.floor(wy / 0.42)
+        cu = (wx + (ri % 2) * 0.24) / 0.48
+        rv = wy / 0.42
+        fu, fv = cu - np.floor(cu), rv - np.floor(rv)
+        is_joint = (fu < 0.08) | (fu > 0.92) | (fv < 0.08) | (fv > 0.92)
+        cid = _hash2(np.floor(cu), ri)
+        bevel = np.where(is_joint, 0.0, 1.0).astype(np.float32)
+        loc_v = np.zeros_like(cid)
 
-    gz = np.full_like(gx, z1) + cam + np.where(is_joint, -0.022, (blk_h - 0.5) * 0.024)
-    edge_d = np.maximum(np.abs(gx) / max(hx, 1e-4), np.abs(gy) / max(hy, 1e-4))
-    patch_n = 0.5 + 0.5 * np.sin((gx + cx) * 3.1) * np.cos((gy + cy) * 2.9 + 0.8)
-    m_mix = np.clip((edge_d - 0.74) * 3.2 * patch_n, 0.0, 0.85)[:, None]
+    edge_rim = np.maximum(np.abs(gx) / max(hx, 1e-4), np.abs(gy) / max(hy, 1e-4))
+    is_coping = edge_rim > 0.86
+    col_stone = np.clip((c_top0[None, :] * (1.0 - cid[:, None]) + c_top1[None, :] * cid[:, None]) * floor_gain * (0.90 + 0.20 * grain[:, None]), 0.0, 1.0)
+    bevel_hl = np.clip((1.0 - bevel) * (~is_joint) * (0.5 - loc_v), 0.0, 0.55)[:, None]
+    col_stone = col_stone * (0.78 + 0.22 * bevel[:, None]) + c_cream[None, :] * (bevel_hl * 0.34)
+    col_stone = np.where(is_coping[:, None], np.clip(col_stone * 1.12 + c_cream[None, :] * 0.14, 0.0, 1.0), col_stone)
 
-    col_stone = c_top0[None, :] * (1.0 - blk_h[:, None]) + c_top1[None, :] * blk_h[:, None]
-    col_t = np.where(is_joint[:, None], c_mort[None, :] * 0.7 + c_m0[None, :] * 0.3, col_stone)
-    col_t = col_t * (1.0 - m_mix) + (c_m0[None, :] * 0.65 + c_m1[None, :] * 0.35) * m_mix
-    pts.append(np.column_stack([gx + cx, gy + cy, gz]))
+    moss_n = _fbm2(wx * 2.0 + 3.1, wy * 2.0 - 2.4)
+    crack_m = np.clip(moss_n * 1.1 - 0.35, 0.0, 0.75)[:, None] * moss_amt
+    crack_col = c_mort[None, :] * (1.0 - crack_m * 0.55) + c_m0[None, :] * (crack_m * 0.55)
+    rim_m = np.clip((edge_rim - 0.80) * 2.2 * np.maximum(moss_n - 0.45, 0.0), 0.0, 0.45)[:, None] * moss_amt
+    col_t = np.where(is_joint[:, None], crack_col, col_stone)
+    col_t = col_t * (1.0 - rim_m) + (c_m0[None, :] * 0.6 + c_m1[None, :] * 0.4) * rim_m
+
+    gz = np.full_like(gx, z1) + cam + np.where(is_joint, -0.026, (cid - 0.5) * 0.022 + bevel * 0.014 + np.where(is_coping, 0.020, 0.0))
+    pts.append(np.column_stack([wx, wy, gz]))
     cols.append(col_t)
-    scs.append(np.tile(np.array([step * 0.62, step * 0.62, 0.028], np.float32), (len(gx), 1)))
+    scs.append(np.tile(np.array([s_top * 0.82, s_top * 0.82, 0.028], np.float32), (len(gx), 1)))
     nrms.append(np.tile(np.array([0.0, 0.0, 1.0], np.float32), (len(gx), 1)))
 
-    zs_v = np.arange(z0, z1 + 1e-4, step * 0.78, dtype=np.float32)
+    # 2. 4 Vertical Walls (1 value step darker & cooler + contact AO at base & coping overhang!)
+    s_w = step * 0.72
+    zs_v = np.arange(z0, z1 + 1e-4, s_w, dtype=np.float32)
     for axis, sign in ((0, -1), (0, 1), (1, -1), (1, 1)):
-        us = ys if axis == 0 else xs
+        us = np.arange(-(hy if axis == 0 else hx), (hy if axis == 0 else hx) + 1e-4, s_w, dtype=np.float32)
         uu, zz = np.meshgrid(us, zs_v)
         uu, zz = uu.ravel(), zz.ravel()
-        course = np.floor((zz - z0) / 0.34)
-        u_blk = (uu + (course % 2) * 0.28) / 0.56
-        v_blk = (zz - z0) / 0.34
-        fu_w, fv_w = u_blk - np.floor(u_blk), v_blk - np.floor(v_blk)
-        joint_w = (fu_w < 0.08) | (fu_w > 0.92) | (fv_w < 0.10) | (fv_w > 0.90)
-        bh_w = ((np.floor(u_blk) * 19.1 + course * 37.3) % 1.0).astype(np.float32)
-        relief = np.where(joint_w, -0.028, (bh_w - 0.45) * 0.038).astype(np.float32)
+        if jitter > 0.05:
+            uu = uu + rng.uniform(-s_w * 0.20, s_w * 0.20, len(uu)).astype(np.float32)
+            zz = zz + rng.uniform(-s_w * 0.20, s_w * 0.20, len(zz)).astype(np.float32)
+            ed_w, bh_w, dv_w = _voronoi_stone_field(uu + (cx if axis == 1 else cy), zz - z0, 1.65, 2.75, jitter)
+            joint_w = ed_w < 0.10
+            bev_w = np.clip((ed_w - 0.10) / 0.14, 0.0, 1.0)
+        else:
+            course = np.floor((zz - z0) / 0.34)
+            ub = (uu + (course % 2) * 0.28) / 0.56
+            vb = (zz - z0) / 0.34
+            fu_w, fv_w = ub - np.floor(ub), vb - np.floor(vb)
+            joint_w = (fu_w < 0.08) | (fu_w > 0.92) | (fv_w < 0.10) | (fv_w > 0.90)
+            bh_w = _hash2(np.floor(ub), course)
+            bev_w = np.where(joint_w, 0.0, 1.0).astype(np.float32)
+            dv_w = (fv_w - 0.5).astype(np.float32)
 
+        gr_w = _fbm2(uu * 4.8 + axis * 11.0, zz * 4.8)
+        relief = np.where(joint_w, -0.032, (bh_w - 0.45) * 0.040 + bev_w * 0.018).astype(np.float32)
         if axis == 0:
-            wx = np.full_like(uu, cx + sign * hx) + sign * relief
-            wy = cy + uu
+            wx_w = np.full_like(uu, cx + sign * hx) + sign * relief
+            wy_w = cy + uu
             nw = np.array([float(sign), 0.0, 0.0], np.float32)
             cam_w = arch_camber * (1.0 - (sign * hx / max(hx, 1e-4)) ** 2)
         else:
-            wx = cx + uu
-            wy = np.full_like(uu, cy + sign * hy) + sign * relief
+            wx_w = cx + uu
+            wy_w = np.full_like(uu, cy + sign * hy) + sign * relief
             nw = np.array([0.0, float(sign), 0.0], np.float32)
             cam_w = arch_camber * (1.0 - (uu / max(hx, 1e-4)) ** 2)
-        wz = zz + cam_w
+        wz_w = zz + cam_w
+
         u_z = np.clip((zz - z0) / max(z1 - z0, 1e-4), 0.0, 1.0)
-        mp_w = 0.5 + 0.5 * np.sin(uu * 2.8 + course * 1.4) * np.cos(zz * 3.2)
-        m_w = np.clip(((u_z > 0.84).astype(np.float32) * 0.65 + (u_z < 0.14).astype(np.float32) * 0.45) * mp_w, 0.0, 0.78)[:, None]
-        col_sw = c_w0[None, :] * (1.0 - bh_w[:, None]) + c_w1[None, :] * bh_w[:, None]
+        ao_bot = (0.50 + 0.50 * np.clip(u_z / 0.28, 0.0, 1.0))[:, None]
+        ao_lip = (1.0 - 0.24 * np.clip((u_z - 0.88) / 0.12, 0.0, 1.0))[:, None]
+        top_hl = np.clip(dv_w * 1.1, 0.0, 0.32)[:, None] * (~joint_w)[:, None]
+        col_sw = (c_w0[None, :] * (1.0 - bh_w[:, None]) + c_w1[None, :] * bh_w[:, None]) * np.array([0.74, 0.78, 0.82], np.float32)
+        col_sw = col_sw * (0.86 + 0.26 * gr_w[:, None]) * ao_bot * ao_lip + c_cream[None, :] * (top_hl * 0.22)
+
+        drape = 0.06 + 0.18 * np.maximum(_fbm2(uu * 1.6 + axis * 5.0, np.zeros_like(uu)) - 0.35, 0.0)
+        top_m = np.clip((u_z - (1.0 - drape)) / np.maximum(drape, 0.04), 0.0, 1.0)[:, None]
+        bot_m = np.clip((0.14 - u_z) / 0.14, 0.0, 1.0)[:, None] * (0.25 + 0.75 * gr_w[:, None]) * 0.45
+        m_w = np.clip(top_m * 0.65 + bot_m, 0.0, 0.68) * moss_amt
         col_w = np.where(joint_w[:, None], c_mort[None, :], col_sw)
-        col_w = col_w * (1.0 - m_w) + c_m0[None, :] * m_w
-        pts.append(np.column_stack([wx, wy, wz]))
+        col_w = col_w * (1.0 - m_w) + (c_m0[None, :] * 0.65 + c_m1[None, :] * 0.35) * m_w
+
+        pts.append(np.column_stack([wx_w, wy_w, wz_w]))
         cols.append(col_w)
-        scs.append(np.tile(np.array([step * 0.55, step * 0.55, step * 0.55], np.float32), (len(uu), 1)))
+        scs.append(np.tile(np.array([s_w * 0.72, s_w * 0.72, s_w * 0.72], np.float32), (len(uu), 1)))
         nrms.append(np.tile(nw, (len(uu), 1)))
 
     if z0 > 0.2:
-        pts.append(np.column_stack([gx + cx, gy + cy, np.full_like(gx, z0) + cam]))
-        cols.append(np.tile(c_w1 * 0.72, (len(gx), 1)))
-        scs.append(np.tile(np.array([step * 0.68, step * 0.68, 0.036], np.float32), (len(gx), 1)))
+        pts.append(np.column_stack([wx, wy, np.full_like(gx, z0) + cam]))
+        cols.append(np.tile(c_mort * 1.15, (len(gx), 1)))
+        scs.append(np.tile(np.array([s_top * 0.78, s_top * 0.78, 0.036], np.float32), (len(gx), 1)))
         nrms.append(np.tile(np.array([0.0, 0.0, -1.0], np.float32), (len(gx), 1)))
 
     xyz_all = np.vstack(pts).astype(np.float32)
