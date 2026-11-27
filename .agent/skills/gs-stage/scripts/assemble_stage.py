@@ -302,6 +302,66 @@ def assemble_map(frame: dict, theme: dict, vframe: VolumetricFrame3D, props_root
             d["f_dc_0"], d["f_dc_1"], d["f_dc_2"] = fdc_p[:, 0], fdc_p[:, 1], fdc_p[:, 2]
             chunks.append(d)
 
+    # Optional theme decorations: overhanging moss ledge tufts, wildflower scatter, volumetric sunbeams & sparkles
+    om = theme.get("overhang_moss")
+    if om:
+        c_ma, c_mb = np.array(om["rgb_a"], np.float32), np.array(om["rgb_b"], np.float32)
+        ov_pts, ov_cols, ov_scs = [], [], []
+        for vol in frame.get("volumes", []):
+            if vol["kind"] not in ("platform", "overpass"):
+                continue
+            cx, cy, hx, hy, zt = vol["cx"], vol["cy"], vol["hx"], vol["hy"], vol["z_top"]
+            cam = float(vol.get("arch_camber", 0.0))
+            for side_axis in (0, 1):
+                for sign in (-1.0, 1.0):
+                    span_len = 2.0 * (hy if side_axis == 0 else hx)
+                    n_tuft = int(span_len * 28)
+                    u = rng.uniform(-1.0, 1.0, n_tuft).astype(np.float32)
+                    if side_axis == 0:
+                        px = cx + sign * (hx + rng.uniform(-0.08, 0.05, n_tuft))
+                        py = cy + u * hy
+                        pz = zt + rng.uniform(-0.10, 0.06, n_tuft)
+                    else:
+                        px = cx + u * hx
+                        py = cy + sign * (hy + rng.uniform(-0.08, 0.05, n_tuft))
+                        pz = zt + cam * (1.0 - u * u) + rng.uniform(-0.10, 0.06, n_tuft)
+                    t_c = rng.uniform(0.0, 1.0, (n_tuft, 1)).astype(np.float32)
+                    ov_pts.append(np.column_stack([px, py, pz]))
+                    ov_cols.append(c_ma[None, :] * (1.0 - t_c) + c_mb[None, :] * t_c)
+                    ov_scs.append(np.column_stack([
+                        rng.uniform(0.05, 0.11, n_tuft),
+                        rng.uniform(0.05, 0.11, n_tuft),
+                        rng.uniform(0.04, 0.09, n_tuft),
+                    ]))
+        if ov_pts:
+            xyz_o = np.vstack(ov_pts).astype(np.float32)
+            rgb_o = shade_splats(xyz_o, np.vstack(ov_cols).astype(np.float32), frame, theme)
+            chunks.append(make_splats(xyz_o, rgb_o, np.vstack(ov_scs).astype(np.float32), np.full(len(xyz_o), 0.94, np.float32), canonical_dtype))
+
+    fl = theme.get("flowers")
+    if fl and int(fl.get("count", 0)) > 0:
+        fcols = np.array(fl["colors"], dtype=np.float32)
+        f_pts, f_cols, f_scs = [], [], []
+        for _ in range(int(fl["count"])):
+            fx = float(rng.uniform(b["x_min"] + 0.3, b["x_max"] - 0.3))
+            fy = float(rng.uniform(b["y_min"] + 0.3, b["y_max"] - 0.3))
+            ix = int(np.clip(round((fx - vframe.x_min) / vframe.res), 0, vframe.nx - 1))
+            iy = int(np.clip(round((fy - vframe.y_min) / vframe.res), 0, vframe.ny - 1))
+            sps = vframe.spans[iy][ix]
+            if not sps:
+                continue
+            sp = sps[-1]
+            if sp["type"] == "stairs" or (sp["type"] == "stone_path" and abs(fx) < 0.55):
+                continue
+            f_pts.append([fx, fy, sp["z"] + float(rng.uniform(0.03, 0.08))])
+            f_cols.append(fcols[rng.integers(0, len(fcols))])
+            r = float(rng.uniform(0.032, 0.055))
+            f_scs.append([r, r, r * 0.75])
+        if f_pts:
+            xyz_f = np.array(f_pts, dtype=np.float32)
+            rgb_f = shade_splats(xyz_f, np.array(f_cols, dtype=np.float32), frame, theme)
+            chunks.append(make_splats(xyz_f, rgb_f, np.array(f_scs, dtype=np.float32), np.full(len(xyz_f), 0.95, np.float32), canonical_dtype))
+
     atm = theme.get("atmosphere", {})
     n_m = int(atm.get("mist_count", 0))
     if n_m > 0:
@@ -312,6 +372,38 @@ def assemble_map(frame: dict, theme: dict, vframe: VolumetricFrame3D, props_root
             np.column_stack([mx, my, mz]), np.tile(np.array(atm["mist_rgb"], np.float32), (n_m, 1)),
             np.tile(np.array([atm["mist_radius"], atm["mist_radius"], atm["mist_radius"] * 0.4], np.float32), (n_m, 1)),
             np.full(n_m, atm["mist_opacity"], np.float32), canonical_dtype,
+        ))
+
+    n_beams = int(atm.get("sunbeam_count", 0))
+    if n_beams > 0:
+        beam_col = np.array(atm.get("sunbeam_rgb", [1.0, 0.92, 0.76]), dtype=np.float32)
+        beam_origins = [(-1.8, 0.4, 5.2), (0.6, 0.2, 5.4), (2.4, -0.5, 5.2), (-3.2, -1.2, 5.0), (1.2, 1.8, 5.2)][:n_beams]
+        beam_dir = np.array([0.42, -0.18, -0.88], dtype=np.float32)
+        beam_dir /= np.linalg.norm(beam_dir)
+        b_pts, b_cols, b_scs, b_ops = [], [], [], []
+        for orig in beam_origins:
+            o = np.array(orig, dtype=np.float32)
+            for t_s in np.linspace(0.0, 4.6, 18):
+                b_pts.append(o + beam_dir * t_s + rng.normal(0.0, 0.06, 3).astype(np.float32))
+                rad = 0.24 + 0.06 * t_s
+                b_cols.append(beam_col)
+                b_scs.append([rad, rad, rad * 1.35])
+                b_ops.append(0.042 * math.sin(math.pi * np.clip(t_s / 4.6, 0.05, 0.95)))
+        chunks.append(make_splats(
+            np.array(b_pts, np.float32), np.array(b_cols, np.float32),
+            np.array(b_scs, np.float32), np.array(b_ops, np.float32), canonical_dtype,
+        ))
+
+    n_sp = int(atm.get("sparkle_count", 0))
+    if n_sp > 0:
+        spx = rng.uniform(b["x_min"] + 0.5, b["x_max"] - 0.5, n_sp).astype(np.float32)
+        spy = rng.uniform(b["y_min"] + 0.5, b["y_max"] - 0.5, n_sp).astype(np.float32)
+        spz = rng.uniform(0.35, 3.8, n_sp).astype(np.float32)
+        chunks.append(make_splats(
+            np.column_stack([spx, spy, spz]),
+            np.tile(np.array(atm.get("sparkle_rgb", [1.0, 0.92, 0.72]), np.float32), (n_sp, 1)),
+            np.full((n_sp, 3), 0.032, dtype=np.float32),
+            np.full(n_sp, 0.95, np.float32), canonical_dtype,
         ))
 
     merged = np.concatenate(chunks, axis=0)

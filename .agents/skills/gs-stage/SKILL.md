@@ -32,9 +32,24 @@ description: >-
 ## 標準ワークフロー
 
 ### 1. フレーム ＆ テーマの準備
-テンプレートをコピーして編集する：
+テンプレートをコピーして編集するか、**参考テーマ画像から `theme.json` を自動コンパイル**する：
 - フレーム雛形: [frame_3d.template.json](./resources/frame_3d.template.json)
 - 森＆石造遺跡テーマ雛形: [theme_forest_ruins.json](./resources/theme_forest_ruins.json)
+- **参考画像 → `theme.json` 自動生成（`compile_theme_from_image.py`）**:
+  ```bash
+  # 2x5 カラーパレット枠付きのテーマテンプレート画像から抽出する場合
+  python skills/gs-stage/scripts/compile_theme_from_image.py \
+    --image work/stage/forest_theme_template.jpg \
+    --out work/stage/theme_forest.json \
+    --name sunlit_forest --mode template
+
+  # 任意のムードボード・風景イラストから K-means で自動抽出する場合
+  python skills/gs-stage/scripts/compile_theme_from_image.py \
+    --image work/stage/moodboard.jpg \
+    --out work/stage/theme_custom.json \
+    --name custom_theme --mode kmeans
+  ```
+  - パレット抽出と同時に、`overhang_moss`（テラス縁の張り出し苔）・`flowers`（小花散布）・`sunbeam_count`（斜め木漏れ日ゴッドレイ）・`sparkle_count`（光の粒）を `theme.json` に自動設定し、`assemble_stage.py` がそのまま 3DGS 化する。
 
 ### 2. ステージ統合アセンブル ＆ 多層 3D ナビ検証（`assemble_stage.py`）
 ```bash
