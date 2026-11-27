@@ -8,7 +8,7 @@
 
 1. **3DGS モデリング＆リギング（`gs-modeling`）** — 単一画像からの 3DGS 生成（ComfyUI / TripoSplat）、正規化、シード比較、素体の整理、動的ドールアイ／まぶた（必須）、プロシージャルなリップシンク口（必須）、22 ボーンの Harmonic DQS リギング、Spark GPU による QA 動画生成。
 2. **2D / HD-2D ゲームスプライト化（`gs-to-sprite`）** — 黒・白 2 パス差分マッティングによる完全透過、望遠・やや俯瞰の HD-2D カメラ、色付き 1px ピクセルアウトライン、チラつきのない統一パレット減色による多方向透過スプライトシート（`.png`）およびアニメーション `.gif` 出力。
-3. **水密メッシュ＆一体 STL 出力（`gs-to-mesh`）** — 3D ガウシアン密度場の抽出、モルフォロジーによるソリッド充填、Marching Cubes、Blender ボクセル結合（任意のミニチュア台座付与）、非多様体・底面 Z=0 検証、6 方向クレイ比較。
+3. **水密メッシュ＆一体 STL 出力（`gs-to-mesh`）** — 異方性 3D ガウシアン密度場の抽出、凹部保護ソリッド充填、Marching Cubes、Blender ボクセル結合（任意の円形ミニチュア台座付与）、エッジ保存バイラテラル法線ノイズ除去、非多様体・底面 `Z=0`・FDM 薄肉自動監査、多方向クレイ比較 QA。
 
 ---
 
@@ -52,6 +52,19 @@
 | :---: | :---: |
 | <img src="docs/assets/showcase/07_campfire_relight_8dir.gif" height="230" alt="夜の焚き火 8方向リアルタイム光源デモ GIF" /> | <img src="docs/assets/showcase/08_chest_explore_relight.gif" height="230" alt="ランタンで宝箱の周りを探索するデモ GIF" /> |
 
+### フィギュア向けポージング ＆ 3D プリント用水密メッシュ（`gs-to-mesh`）
+同じ Harmonic DQS スケルトンを使って任意の立ちポーズ＋3DGS 小物（ランタン掲げ・首傾げ・自然なスタンス広げ・両足 `Z=0` 接地）を付け、**異方性ガウシアン密度場 → 凹部保護ソリッド充填 → Blender 32 mm 台座結合 → エッジ保存バイラテラル法線ノイズ除去 → FDM 薄肉自動監査**を通して、**1 連結・非多様体エッジ 0 の 3D プリント用 `.stl` / `.glb`** へ変換します：
+
+<p align="center">
+  <img src="docs/assets/showcase/10_posed_lantern_3dgs.jpg" width="760" alt="ランタンを掲げた探索ポーズの 3DGS（4方向プレビュー）" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/showcase/11_watertight_stl_clay_8view.jpg" width="760" alt="バイラテラル法線フィルタリング適用済み 32mm ミニチュア STL の 8方向クレイ QA" />
+</p>
+
+- **出力検証結果（`hood01_lantern_32mm_fdm.stl`）**: `nonmanifold_edges = 0` · `components = 1` · `min_z = 0.0 mm` · 外寸 `32.0 × 31.9 × 44.2 mm` · FDM `0.4 mm` ノズル肉厚監査（`p05 = 0.45 mm` / 中央値 `1.47 mm` / 1 ノズル未満 `2.8%`）
+
 ### エージェントへの指示例（使い方イメージ）
 **Antigravity** / **Claude Code** / **Codex** にスキルを導入した状態で、2D 画像を添付して自然言語で依頼するだけで実行できます：
 
@@ -59,6 +72,8 @@
   > *「このデザイン画から `gs-modeling` でリグ付き 3DGS キャラを作って。動的アイ・口パク・QA 動画まで確認して」*
 - **8 方向 HD-2D 歩行スプライト＆ GIF を出す（`gs-to-sprite`）**:
   > *「`gs-to-sprite` で 8 方向の 80px・48 色の HD-2D 歩行スプライトと、`--scene-preview` 付きの GIF を作って」*
+- **ポーズを付けて 3D プリント用 STL を作る（`gs-to-mesh`）**:
+  > *「ランタンを掲げて周囲を見渡すフィギュアポーズを付けて、`gs-to-mesh` で 32mm 台座付きの FDM 向け水密 STL（`--opening 1 --fdm-nozzle-mm 0.4`）と 8 方向クレイ QA を出力して」*
 - **画質・テイストの出し分け例**:
   - レトロ RPG 風：`--size 64 --colors 32 --num-frames 4`
   - クラシック HD-2D 風：`--size 80 --colors 48 --pitch 14 --fov 11 --scene-preview`

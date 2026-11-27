@@ -7,7 +7,7 @@ Modular local **3D Gaussian Splatting (3DGS)** asset pipelines and **multi-agent
 Start from a single 2D reference image, build a clean rigged 3DGS character, and branch into:
 1. **3DGS Modeling & Rigging (`gs-modeling`)** — Single-image 3DGS generation (ComfyUI / TripoSplat), normalization, multi-seed comparison, body cleanup, mandatory dynamic doll eyes/eyelids and procedural lip-sync mouth, 22-bone Harmonic DQS rigging, and Spark GPU QA videos.
 2. **2D / HD-2D Game Sprites (`gs-to-sprite`)** — Multi-angle transparent sprite sheets (`.png`) and animated `.gif` exports with dual-background exact alpha matting, telephoto/top-down framing, tinted 1px pixel outlines, and unified flicker-free palettes.
-3. **Watertight Mesh & Unified STL (`gs-to-mesh`)** — 3D Gaussian density field extraction, morphological solid filling, marching cubes, Blender voxel union (with optional miniature base), manifold/Z=0 validation, and 6-view clay comparison.
+3. **Watertight Mesh & Unified STL (`gs-to-mesh`)** — Anisotropic 3D Gaussian density extraction, concave-safe solid filling, marching cubes, Blender voxel union (with optional circular miniature base), edge-preserving bilateral normal denoising, manifold/`Z=0` + FDM wall-thickness audit, and multi-view clay QA.
 
 ---
 
@@ -51,6 +51,19 @@ Adding `--export-maps` exports pixel-aligned **camera-space depth** and **view-s
 | :---: | :---: |
 | <img src="docs/assets/showcase/07_campfire_relight_8dir.gif" height="230" alt="Nighttime campfire 8-direction relighting GIF" /> | <img src="docs/assets/showcase/08_chest_explore_relight.gif" height="230" alt="Lantern exploration around treasure chest with 3DGS props GIF" /> |
 
+### Hero Posing & 3D-Printable Watertight Mesh (`gs-to-mesh`)
+Using the same Harmonic DQS skeleton, you can pose the character with custom 3DGS props (e.g., raised vintage lantern, curious head tilt, widened natural figure stance with boots grounded at `Z = 0`) and export a **single-component, watertight, FDM-ready `.stl` / `.glb`** via anisotropic Gaussian density extraction, concave-safe solid filling, edge-preserving **bilateral normal denoising**, and automatic BVHTree wall-thickness audit:
+
+<p align="center">
+  <img src="docs/assets/showcase/10_posed_lantern_3dgs.jpg" width="760" alt="Posed 3DGS character holding a lantern (4-view preview)" />
+</p>
+
+<p align="center">
+  <img src="docs/assets/showcase/11_watertight_stl_clay_8view.jpg" width="760" alt="Watertight 32mm miniature STL 8-view clay QA with bilateral normal denoising" />
+</p>
+
+- **Verified Print Output (`hood01_lantern_32mm_fdm.stl`)**: `nonmanifold_edges = 0` · `components = 1` · `min_z = 0.0 mm` · `32.0 × 31.9 × 44.2 mm` · FDM `0.4 mm` nozzle audit (`p05 = 0.45 mm`, `median = 1.47 mm`, `< 1 nozzle = 2.8%`).
+
 ### Example Agent Prompts (How to Use)
 Once installed in **Antigravity**, **Claude Code**, or **Codex**, just attach a 2D character image and ask naturally:
 
@@ -58,6 +71,8 @@ Once installed in **Antigravity**, **Claude Code**, or **Codex**, just attach a 
   > *"Create a rigged 3DGS character from this image using `gs-modeling`, including dynamic eyes, lip-sync mouth, and a QA video."*
 - **Export HD-2D walking sprites (`gs-to-sprite`)**:
   > *"Using `gs-to-sprite`, generate an 8-direction 80px HD-2D walking sprite sheet (48 colors, `pitch 14°`) with `--scene-preview` and an animated GIF."*
+- **Pose and export a 3D-printable STL (`gs-to-mesh`)**:
+  > *"Pose the character holding a lantern in a natural figure stance, then convert it with `gs-to-mesh` into a watertight 32mm-base STL (`--opening 1 --fdm-nozzle-mm 0.4`) with 8-view clay QA."*
 - **Customize sprite style on the fly**:
   - Retro RPG: `--size 64 --colors 32 --num-frames 4`
   - Classic HD-2D: `--size 80 --colors 48 --pitch 14 --fov 11 --scene-preview`
