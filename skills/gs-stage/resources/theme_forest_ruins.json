@@ -1,0 +1,38 @@
+{
+  "name": "forest_ruins",
+  "title": "森と苔むした石造遺跡",
+  "background_hex": "#2b3836",
+  "lighting": {
+    "ambient": [0.66, 0.72, 0.70],
+    "sun_dir": [-0.38, -0.52, 0.76],
+    "sun_color": [0.36, 0.36, 0.30],
+    "point_light_strength": 0.32,
+    "light_colors": {
+      "soft_ivory": [0.98, 0.92, 0.76],
+      "soft_aqua": [0.46, 0.78, 0.92],
+      "soft_mint": [0.64, 0.88, 0.70]
+    }
+  },
+  "prop_grade": {
+    "tint": [0.98, 1.02, 0.97],
+    "saturation": 0.98,
+    "brightness": 1.00
+  },
+  "surfaces": {
+    "forest_floor": { "base_rgb": [0.20, 0.33, 0.19], "alt_rgb": [0.31, 0.44, 0.25] },
+    "stone_path":   { "base_rgb": [0.48, 0.49, 0.45], "alt_rgb": [0.38, 0.40, 0.36] },
+    "ruin_stone":   { "base_rgb": [0.52, 0.53, 0.49], "alt_rgb": [0.40, 0.42, 0.38] },
+    "ruin_wall":    { "base_rgb": [0.44, 0.45, 0.42], "alt_rgb": [0.33, 0.35, 0.32] },
+    "mortar":       { "base_rgb": [0.16, 0.19, 0.17] },
+    "stairs":       { "base_rgb": [0.49, 0.50, 0.46], "alt_rgb": [0.38, 0.40, 0.36] },
+    "moss":         { "base_rgb": [0.22, 0.37, 0.20], "alt_rgb": [0.34, 0.48, 0.26] }
+  },
+  "atmosphere": {
+    "mist_count": 70,
+    "mist_rgb": [0.72, 0.80, 0.78],
+    "mist_opacity": 0.038,
+    "mist_radius": 0.46,
+    "sparkle_count": 45,
+    "sparkle_rgb": [0.90, 0.96, 0.82]
+  }
+}

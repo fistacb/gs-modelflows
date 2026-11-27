@@ -18,7 +18,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
 SKILLS_SRC = REPO_ROOT / "skills"
-SKILL_NAMES = ("gs-modeling", "gs-to-sprite", "gs-to-mesh")
+SKILL_NAMES = ("gs-modeling", "gs-to-sprite", "gs-to-mesh", "gs-stage")
 
 REPO_AGENT_DIRS = [
     REPO_ROOT / ".agent" / "skills",

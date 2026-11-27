@@ -71,6 +71,13 @@ Given a single multi-object prop sheet (black, white, or transparent background)
   <img src="docs/assets/showcase/12_forest_pack_32_3dgs.jpg" width="760" alt="32 forest village 3DGS static props batch-generated from a single 2D prop sheet" />
 </p>
 
+### 3D Volumetric Map Frame × Multi-Layer Walkthrough (`gs-stage`)
+Separating **Frame** (3D multi-layer walkable spans, ramps, overpasses, prop anchors, lights), **Theme** (swappable cut-stone masonry, forest ground, moss, atmosphere), and **standalone Splat objects** (`v1_prop/` + rigged `v1/`), `gs-stage` compiles true multi-layer 3D navigation (`(ix, iy, span_idx)` with step-height & headroom limits) so rigged characters and game sprites can walk **under an overpass, climb stone stairs, and cross directly over the exact same `(x, y)` on the upper skybridge**:
+
+| 2-Story Mossy Stone Ruins & Forest (4-View 3DGS) | Multi-Layer 3D Crossing Walkthrough (Underpass → Stairs → Overpass) |
+| :---: | :---: |
+| <img src="docs/assets/showcase/13_stage_ruins_4view.jpg" height="240" alt="2-story mossy stone ruins 4-view 3DGS stage" /> | <img src="docs/assets/showcase/14_stage_3d_crossing_walk.gif" height="240" alt="hood-01 walking under stone overpass, climbing stairs, and crossing above" /> |
+
 ### Example Agent Prompts (How to Use)
 Once installed in **Antigravity**, **Claude Code**, or **Codex**, just attach a 2D character image and ask naturally:
 
