@@ -135,6 +135,8 @@ def crop_head_by_neck(rgb: Image.Image, fg: np.ndarray) -> tuple[Image.Image, fl
             break
 
     # 3. Compute tight horizontal head bbox strictly from rows [y0 .. y0 + neck_idx]
+    if neck_idx < max(20, int(h_tot * 0.25)):
+        neck_idx = int(h_tot * 0.72)
     sub_fg = fg[y0 : y0 + neck_idx + 1, :]
     ys, xs = np.where(sub_fg)
     if len(xs) < 20:
@@ -677,6 +679,11 @@ def run_gate4(args) -> int:
             bust_top_frac=float(args.bust_top_frac),
         )
         f0_nobanner.unlink(missing_ok=True)
+        if design_match and float(design_match.get("render_aspect_hw", 0.0)) < 0.05:
+            failures.append(
+                f"Gate 4 Frame 0 foreground detection failed (render_aspect_hw={design_match.get('render_aspect_hw')}); "
+                "cannot verify 1:1 consistency against design."
+            )
 
     report = {
         "validator": "verify_gate.py",

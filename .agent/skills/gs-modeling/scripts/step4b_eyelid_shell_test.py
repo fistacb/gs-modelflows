@@ -52,6 +52,26 @@ def detect_lash_ceiling_dz(xyz: np.ndarray, rgb: np.ndarray, is_body: np.ndarray
     return float(rz * 1.12)
 
 
+def _fit_robust_face_quad(skin_xyz: np.ndarray, cx: float, cz: float, rx: float) -> np.ndarray:
+    """2-stage IRLS robust quadratic fit y(dx, dz) that rejects deep socket-wall or foreground-bangs outliers."""
+    d_local = np.hypot(skin_xyz[:, 0] - cx, skin_xyz[:, 2] - cz)
+    local_m = d_local < max(rx * 2.4, 0.028)
+    if local_m.sum() < 16:
+        local_m = d_local < max(rx * 4.2, 0.055)
+    pts_fit = skin_xyz[local_m]
+    dx_f, dz_f = pts_fit[:, 0] - cx, pts_fit[:, 2] - cz
+    A = np.column_stack([np.ones_like(dx_f), dx_f, dz_f, dx_f * dx_f, dx_f * dz_f, dz_f * dz_f])
+    w_base = np.exp(-(d_local[local_m] / max(rx * 1.5, 0.020)) ** 2)
+    w = w_base.copy()
+    for _ in range(4):
+        coef, _, _, _ = np.linalg.lstsq(A * w[:, None], pts_fit[:, 1] * w, rcond=None)
+        resid = np.abs(A @ coef - pts_fit[:, 1])
+        # Huber / Tukey-like downweight for outliers > 2.5 mm off the true front skin surface
+        rob = np.where(resid < 0.0025, 1.0, 0.0012 / np.maximum(resid, 1e-5))
+        w = w_base * rob
+    return coef
+
+
 def build_eyelid_shell(
     eye_center: np.ndarray,
     surf_center: np.ndarray,
@@ -62,11 +82,23 @@ def build_eyelid_shell(
     dtype: np.dtype,
     rx_rz: tuple[float, float] = (0.0385, 0.0315),
     lash_top_bot: tuple[float, float] = (0.0115, -0.0195),
-    lash_rgb: tuple[float, float, float] = (0.14, 0.11, 0.12),
+    lash_rgb: tuple[float, float, float] | None = None,
     dz_top_cap: float | None = None,
+    face_quad_coef: list[float] | np.ndarray | None = None,
+    always_draw_lash: bool = False,
+    eye_style: dict | None = None,
+    eye_radius: float | None = None,
+    ref_xyz: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Fit a smooth quadratic surface to surrounding facial skin + subtle eyeball dome and generate a natural anime eyelid."""
-    if blink <= 0.02:
+    """Fit a robust quadratic face surface and generate a flush anime eyelid + design-matched eyelash stroke.
+
+    - Uses 2D design-art eye_style (lash_rgb, lash_span_over_deye, lash_thick_over_deye, lash_arch_ratio)
+      when available so color, width, thickness and arch match the character's design art automatically.
+    - Projects every lash/eyelid point onto the actual 3D face/eyeball support surface (scale-invariant in
+      skin_scale_med) and clips endpoints lacking 3D support so lashes NEVER float or protrude obliquely.
+    - Skin curtain stays strictly ABOVE the moving lash edge during half-blink (sealing below only for blink > 0.80).
+    """
+    if blink <= 0.02 and not always_draw_lash:
         return np.zeros(0, dtype=dtype)
 
     cx, cy, cz = float(surf_center[0]), float(surf_center[1]), float(surf_center[2])
@@ -74,121 +106,232 @@ def build_eyelid_shell(
     rz_up = min(rz * 1.06, float(dz_top_cap) * 1.02) if dz_top_cap is not None else rz * 1.06
     rz_dn = rz * 1.02
 
-    d_local = np.hypot(skin_xyz[:, 0] - cx, skin_xyz[:, 2] - cz)
-    local_m = d_local < max(rx * 2.2, 0.025)
-    if local_m.sum() < 12:
-        local_m = d_local < max(rx * 4.0, 0.055)
-    pts_fit = skin_xyz[local_m]
-    dx_f, dz_f = pts_fit[:, 0] - cx, pts_fit[:, 2] - cz
-    A = np.column_stack([np.ones_like(dx_f), dx_f, dz_f, dx_f * dx_f, dx_f * dz_f, dz_f * dz_f])
-    w_fit = np.exp(-(d_local[local_m] / max(rx * 1.4, 0.018)) ** 2)
-    coef, _, _, _ = np.linalg.lstsq(A * w_fit[:, None], pts_fit[:, 1] * w_fit, rcond=None)
+    if face_quad_coef is not None and len(face_quad_coef) == 6:
+        coef = np.asarray(face_quad_coef, dtype=np.float64)
+    else:
+        coef = _fit_robust_face_quad(skin_xyz, cx, cz, rx)
 
-    GX, GZ = np.meshgrid(np.linspace(-rx, rx, 44), np.linspace(-rz_dn, rz_up, 40))
-    dx, dz = GX.ravel().astype(np.float32), GZ.ravel().astype(np.float32)
-    u = dx / max(rx, 1e-5)
-    v = np.where(dz >= 0.0, dz / max(rz_up, 1e-5), dz / max(rz_dn, 1e-5))
-    r_ell = np.sqrt(u * u + v * v)
+    # Pull character-adaptive lash parameters from 2D design-art eye_style when present
+    style = eye_style or {}
+    d_eye_3d = float(style.get("d_eye_3d", rx * 3.6))
+    arch_ratio = float(style.get("lash_arch_ratio", 0.36))
+    ec = np.asarray(eye_center, dtype=np.float64)
+    r_ball = float(eye_radius) if eye_radius is not None else float(max(abs(ec[1] - cy) * 0.94, rx * 0.72))
 
-    # Natural anime lash curve:
-    # Open (blink=0): arches UP in the middle and curves down at inner/outer corners
-    # Closed (blink=1): clean low horizontal/gentle-smile curve covering the entire iris
-    z_top_mid = float(lash_top_bot[0]) + rz * 0.10
-    z_bot_mid = float(lash_top_bot[1]) * 0.96
-    z_lash_open = z_top_mid - (rz * 0.30) * (u * u)
-    z_lash_closed = z_bot_mid + (rz * 0.14) * (u * u)
-    z_cur_edge = z_lash_open * (1.0 - blink) + z_lash_closed * blink
+    # Automatic sanpaku prevention: ensure open upper lash hugs the upper iris rim (no staring white gap above iris!)
+    z_top_mid = float(lash_top_bot[0])
+    z_bot_mid = float(lash_top_bot[1])
+    iris_deg = style.get("iris_rx_rz_deg")
+    if iris_deg is not None and len(iris_deg) == 2:
+        iris_top_z = r_ball * float(np.sin(np.radians(float(iris_deg[1]))))
+        # Hug just slightly over the top edge of the iris (~92%) for a soft, cute, non-staring anime gaze
+        z_top_mid = min(z_top_mid, iris_top_z * 0.94)
+    else:
+        z_top_mid = min(z_top_mid, r_ball * 0.74)
 
-    # Keep skin splats from upper cap down past the moving lash edge (at full blink cover full lower socket too)
-    lower_margin = rz * (0.10 + 0.25 * blink)
-    keep = (r_ell <= 1.0) & (dz >= z_cur_edge - lower_margin)
-    dx, dz, u, r_ell, z_edge = dx[keep], dz[keep], u[keep], r_ell[keep], z_cur_edge[keep]
-    n = len(dx)
-    if n == 0:
-        return np.zeros(0, dtype=dtype)
+    def _lash_z(u_arr: np.ndarray) -> np.ndarray:
+        # Soft dome arch wrapping gently down around the iris contour (eliminates flat/stern bar look)
+        arch_drop = rz * (0.44 + 0.36 * arch_ratio)
+        z_op = z_top_mid - arch_drop * (u_arr * u_arr)
+        z_cl = z_bot_mid + (rz * 0.14) * (u_arr * u_arr)
+        return z_op * (1.0 - blink) + z_cl * blink
 
-    # Flush quadratic face surface (flat anime cheek continuity, no puffy bulge)
-    y_quad = coef[0] + coef[1] * dx + coef[2] * dz + coef[3] * dx * dx + coef[4] * dx * dz + coef[5] * dz * dz
-    dome = np.maximum(0.0, 1.0 - r_ell * r_ell) * (rz * 0.04)
-    y_surf = y_quad - dome - max(rz * 0.03, 0.0004)
+    # Build 2D (x, z) KD-tree of actual front-facing head surface around this eye (includes forehead/upper rim
+    # that detect_face_skin_mask excludes!) for exact local surface projection & silhouette guard.
+    surf_pts = ref_xyz if (ref_xyz is not None and len(ref_xyz) >= 20) else skin_xyz
+    m_loc_ref = (
+        (np.abs(surf_pts[:, 0] - cx) < rx * 2.2)
+        & (np.abs(surf_pts[:, 2] - cz) < rz * 2.2)
+        & (surf_pts[:, 1] < cy + max(rx * 1.4, 0.025))
+        & (surf_pts[:, 1] > cy - max(rx * 1.2, 0.020))
+    )
+    loc_ref = surf_pts[m_loc_ref] if m_loc_ref.sum() >= 12 else surf_pts
+    ref_xz_tree = cKDTree(loc_ref[:, [0, 2]]) if len(loc_ref) >= 8 else None
+    r_tan = float(np.clip(skin_scale_med * 1.15, max(rx * 0.065, 0.0009), max(rx * 0.10, 0.0016)))
+    skin_depth_thick = r_tan * 0.28
 
-    dy_dx = coef[1] + 2.0 * coef[3] * dx + coef[4] * dz
-    dy_dz = coef[2] + coef[4] * dx + 2.0 * coef[5] * dz
-    normals = np.column_stack([dy_dx, -np.ones_like(dx), dy_dz]).astype(np.float32)
-    normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-8)
+    def _project_to_true_surface(x_arr: np.ndarray, z_arr: np.ndarray, y_quad_arr: np.ndarray, is_1d_curve: bool = False) -> tuple[np.ndarray, np.ndarray]:
+        """Project (x, z) onto the exact visible frontmost 3D surface (actual head splats + eyeball cap).
 
-    xyz = np.column_stack([cx + dx, y_surf, cz + dz]).astype(np.float32)
-    rot = normal_to_quat_wxyz(normals)
+        - Where actual head/forehead/cheek splats exist within local radius, tracks their frontmost Y directly
+          (never burying behind forehead skin and never protruding 7-11 mm forward!).
+        - Over the carved eye socket opening, smoothly bridges across the eyeball front cap.
+        - Clips endpoints that lack both head and eyeball support (eliminates oblique air protrusion).
+        """
+        y_out = y_quad_arr.astype(np.float64).copy()
+        has_support = np.ones(len(x_arr), dtype=bool)
 
-    # Pure flat anime skin color matched seamlessly to surrounding neutral facial skin
-    tree = cKDTree(skin_xyz)
-    dists, idx = tree.query(xyz, k=min(16, len(skin_xyz)))
-    w_idw = 1.0 / np.maximum(dists, 1e-4)
-    w_idw /= w_idw.sum(axis=1, keepdims=True)
-    fdc = np.sum(w_idw[:, :, None] * skin_fdc[idx], axis=1).astype(np.float32)
-    rgb_skin = np.clip(0.5 + SH_C0 * fdc, 0.0, 1.0)
-    fdc = (rgb_skin - 0.5) / SH_C0
+        # Eyeball front cap Y at (x, z)
+        rad_sq = (r_ball * r_ball) - (x_arr - ec[0]) ** 2 - (z_arr - ec[2]) ** 2
+        in_ball = rad_sq > 0.0
+        y_ball = np.full(len(x_arr), np.inf, dtype=np.float64)
+        y_ball[in_ball] = ec[1] - np.sqrt(np.maximum(rad_sq[in_ball], 0.0))
 
-    # Pure opaque skin shell (NO blurry dark lash blending onto coarse skin splats!)
-    blink_vis = float(smoothstep(0.04, 0.20, blink))
-    alpha_edge = (1.0 - smoothstep(0.84, 1.00, r_ell)) * blink_vis
-    alpha_prob = np.clip(alpha_edge * 0.995, 0.02, 0.996)
-    opacity_logit = np.log(alpha_prob / (1.0 - alpha_prob)).astype(np.float32)
+        if ref_xz_tree is not None:
+            pts_xz = np.column_stack([x_arr, z_arr])
+            k_q = min(8, len(loc_ref))
+            dists, idxs = ref_xz_tree.query(pts_xz, k=k_q)
+            if k_q == 1:
+                dists = dists[:, None]
+                idxs = idxs[:, None]
+            y_nbrs = loc_ref[idxs, 1]
+            # Frontmost local head splats (15th percentile in Y = frontmost toward -Y camera)
+            y_head_loc = np.percentile(y_nbrs, 15, axis=1)
+            min_d = dists[:, 0]
+            # Support exists if inside eyeball disk OR within 0.35*rx of real head surface
+            has_support = in_ball | (min_d < max(rx * 0.35, skin_scale_med * 3.0))
 
-    r_tan = float(np.clip(skin_scale_med * 1.25, max(rx * 0.06, 0.0008), max(rx * 0.11, 0.0018)))
-    skin_out = np.zeros(n, dtype=dtype)
-    skin_out["x"], skin_out["y"], skin_out["z"] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
-    skin_out["f_dc_0"], skin_out["f_dc_1"], skin_out["f_dc_2"] = fdc[:, 0], fdc[:, 1], fdc[:, 2]
-    skin_out["opacity"] = opacity_logit
-    skin_out["scale_0"] = np.log(r_tan)
-    skin_out["scale_1"] = np.log(r_tan)
-    skin_out["scale_2"] = np.log(r_tan * 0.28)
-    skin_out["rot_0"], skin_out["rot_1"], skin_out["rot_2"], skin_out["rot_3"] = rot[:, 0], rot[:, 1], rot[:, 2], rot[:, 3]
+            # Tight local trust weight: trust y_head_loc when real splats exist right at (x, z) (< 3.5 mm),
+            # and smoothly hand off to y_ball (or regularized y_quad) inside the carved socket opening.
+            r_trust = max(skin_scale_med * 2.8, 0.0038)
+            w_head = np.clip(1.0 - min_d / r_trust, 0.0, 1.0)
+            y_socket = np.where(in_ball, np.minimum(y_ball, y_quad_arr), y_quad_arr)
+            # Take frontmost of local head and eyeball when both are present
+            y_head_eff = np.where(in_ball, np.minimum(y_head_loc, y_ball), y_head_loc)
+            y_out = w_head * y_head_eff + (1.0 - w_head) * y_socket
+            # Guarantee clearance in front of eyeball front cap everywhere inside eyeball disk
+            y_out = np.where(in_ball, np.minimum(y_out, y_ball), y_out)
+        else:
+            y_out = np.where(in_ball, np.minimum(y_out, y_ball), y_out)
 
-    # Dedicated high-res razor-sharp anime eyelash stroke (96 tiny crisp ink splats sitting flush in front of the lid)
-    n_lash = 96
-    u_l = np.linspace(-0.82, 0.82, n_lash, dtype=np.float32)
+        if is_1d_curve and len(y_out) >= 12:
+            # Smooth 1D depth curve so lash glides cleanly across the socket-to-forehead transition
+            ker = np.array([0.08, 0.16, 0.24, 0.24, 0.16, 0.08], dtype=np.float64)
+            ker /= ker.sum()
+            y_pad = np.pad(y_out, (2, 3), mode="edge")
+            y_sm = np.convolve(y_pad, ker, mode="valid")
+            # Keep frontmost of smoothed and eyeball cap so eyeball never pokes through the middle of the lash!
+            y_out = np.where(in_ball, np.minimum(y_sm, y_ball), y_sm)
+
+        return y_out.astype(np.float32), has_support
+
+    parts = []
+
+    # 1. Skin curtain (only drawn when blink > 0.03 so open eyes NEVER overwrite cheek blush!)
+    if blink > 0.03:
+        GX, GZ = np.meshgrid(np.linspace(-rx, rx, 44), np.linspace(-rz_dn, rz_up, 40))
+        dx, dz = GX.ravel().astype(np.float32), GZ.ravel().astype(np.float32)
+        u = dx / max(rx, 1e-5)
+        v = np.where(dz >= 0.0, dz / max(rz_up, 1e-5), dz / max(rz_dn, 1e-5))
+        r_ell = np.sqrt(u * u + v * v)
+        z_cur_edge = _lash_z(u)
+
+        # Seal below the lash ONLY when nearly closed (blink > 0.80) so half-blink cleanly reveals lower iris
+        seal_below = float(smoothstep(0.80, 0.98, blink))
+        lower_margin = rz_dn * 0.52 * seal_below
+        keep = (r_ell <= 1.0) & (dz >= z_cur_edge - lower_margin)
+        if keep.any():
+            dx_k, dz_k, r_k = dx[keep], dz[keep], r_ell[keep]
+            y_quad = coef[0] + coef[1] * dx_k + coef[2] * dz_k + coef[3] * dx_k * dx_k + coef[4] * dx_k * dz_k + coef[5] * dz_k * dz_k
+            y_clamped, sup_k = _project_to_true_surface(cx + dx_k, cz + dz_k, y_quad)
+            # Uniform flush offset along surface normal (scale-invariant)
+            y_surf = y_clamped - max(skin_depth_thick * 0.85, 0.00035)
+
+            dy_dx = coef[1] + 2.0 * coef[3] * dx_k + coef[4] * dz_k
+            dy_dz = coef[2] + coef[4] * dx_k + 2.0 * coef[5] * dz_k
+            normals = np.column_stack([dy_dx, -np.ones_like(dx_k), dy_dz]).astype(np.float32)
+            normals /= np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-8)
+
+            xyz = np.column_stack([cx + dx_k, y_surf, cz + dz_k]).astype(np.float32)
+            rot = normal_to_quat_wxyz(normals)
+
+            # Match color strictly to surrounding cheek skin below the eye + local IDW (avoids pale/grey patch!)
+            skin_rgb_all = np.clip(0.5 + SH_C0 * skin_fdc, 0.0, 1.0)
+            cheek_m = (
+                (np.abs(skin_xyz[:, 0] - cx) < rx * 1.4)
+                & (skin_xyz[:, 2] < cz - rz_dn * 0.45)
+                & (skin_xyz[:, 2] > cz - rz_dn * 2.4)
+            )
+            cheek_rgb = np.median(skin_rgb_all[cheek_m], axis=0).astype(np.float32) if cheek_m.sum() >= 8 else np.median(skin_rgb_all, axis=0).astype(np.float32)
+
+            tree = cKDTree(skin_xyz)
+            dists, idx = tree.query(xyz, k=min(14, len(skin_xyz)))
+            w_idw = 1.0 / np.maximum(dists, 1e-4)
+            w_idw /= w_idw.sum(axis=1, keepdims=True)
+            idw_rgb = np.sum(w_idw[:, :, None] * skin_rgb_all[idx], axis=1).astype(np.float32)
+            rgb_skin = np.clip(0.55 * cheek_rgb[None, :] + 0.45 * idw_rgb, 0.0, 1.0)
+            fdc = (rgb_skin - 0.5) / SH_C0
+
+            blink_vis = float(smoothstep(0.03, 0.16, blink))
+            alpha_edge = (1.0 - smoothstep(0.74, 1.00, r_k)) * blink_vis * np.where(sup_k, 1.0, 0.15)
+            alpha_prob = np.clip(alpha_edge * 0.992, 0.02, 0.995)
+            opacity_logit = np.log(alpha_prob / (1.0 - alpha_prob)).astype(np.float32)
+
+            skin_out = np.zeros(len(dx_k), dtype=dtype)
+            skin_out["x"], skin_out["y"], skin_out["z"] = xyz[:, 0], xyz[:, 1], xyz[:, 2]
+            skin_out["f_dc_0"], skin_out["f_dc_1"], skin_out["f_dc_2"] = fdc[:, 0], fdc[:, 1], fdc[:, 2]
+            skin_out["opacity"] = opacity_logit
+            skin_out["scale_0"] = np.log(r_tan)
+            skin_out["scale_1"] = np.log(r_tan)
+            skin_out["scale_2"] = np.log(skin_depth_thick)
+            skin_out["rot_0"], skin_out["rot_1"], skin_out["rot_2"], skin_out["rot_3"] = rot[:, 0], rot[:, 1], rot[:, 2], rot[:, 3]
+            parts.append(skin_out)
+
+    # 2. Design-art-matched anime eyelash stroke (soft natural color & alpha taper, clamped to 3D face surface!)
+    n_lash = 76
+    # Derive horizontal span from 2D design-art lash_span_over_deye (fallback ~0.78*rx)
+    span_half_world = 0.5 * float(style.get("lash_span_over_deye", 0.42)) * d_eye_3d
+    u_max = float(np.clip(span_half_world / max(rx, 1e-5), 0.62, 0.86))
+    u_l = np.linspace(-u_max, u_max, n_lash, dtype=np.float32)
     dx_l = u_l * rx
-    z_l_open = z_top_mid - (rz * 0.30) * (u_l * u_l)
-    z_l_closed = z_bot_mid + (rz * 0.14) * (u_l * u_l)
-    dz_l = z_l_open * (1.0 - blink) + z_l_closed * blink
-    v_l = np.where(dz_l >= 0.0, dz_l / max(rz_up, 1e-5), dz_l / max(rz_dn, 1e-5))
-    r_l = np.sqrt(u_l * u_l + v_l * v_l)
+    dz_l_base = _lash_z(u_l)
 
-    y_quad_l = coef[0] + coef[1] * dx_l + coef[2] * dz_l + coef[3] * dx_l * dx_l + coef[4] * dx_l * dz_l + coef[5] * dz_l * dz_l
-    dome_l = np.maximum(0.0, 1.0 - r_l * r_l) * (rz * 0.04)
-    # Sit 0.55 mm in front of the skin lid so it renders razor-sharp with zero Z-fighting or skin bleed
-    y_l = y_quad_l - dome_l - max(rz * 0.03, 0.0004) - 0.00055
-
-    dy_dx_l = coef[1] + 2.0 * coef[3] * dx_l + coef[4] * dz_l
-    dy_dz_l = coef[2] + coef[4] * dx_l + 2.0 * coef[5] * dz_l
-    nrm_l = np.column_stack([dy_dx_l, -np.ones_like(dx_l), dy_dz_l]).astype(np.float32)
-    nrm_l /= np.maximum(np.linalg.norm(nrm_l, axis=1, keepdims=True), 1e-8)
-    rot_l = normal_to_quat_wxyz(nrm_l)
-
-    taper_l = 1.0 - smoothstep(0.50, 0.86, np.abs(u_l))
-    r_lash_thick = np.clip(rx * (0.014 + 0.018 * taper_l), 0.00022, 0.00058).astype(np.float32)
-    r_lash_along = np.full(n_lash, max(rx * 0.028, 0.00045), dtype=np.float32)
-    r_lash_depth = (r_lash_thick * 0.40).astype(np.float32)
-
-    alpha_l = np.clip((0.88 + 0.11 * taper_l) * blink_vis, 0.02, 0.995)
-    op_l = np.log(alpha_l / (1.0 - alpha_l)).astype(np.float32)
-    # Deep crisp anime ink color
-    ink_rgb = np.array([min(lash_rgb[0], 0.09), min(lash_rgb[1], 0.07), min(lash_rgb[2], 0.08)], dtype=np.float32)
+    # Use 2D-extracted character lash color directly (NO forced near-black clamp!)
+    if "lash_rgb" in style and len(style["lash_rgb"]) == 3:
+        ink_rgb = np.asarray(style["lash_rgb"], dtype=np.float32)
+    elif lash_rgb is not None:
+        ink_rgb = np.asarray(lash_rgb, dtype=np.float32)
+    else:
+        ink_rgb = np.array([0.28, 0.16, 0.14], dtype=np.float32)
+    ink_rgb = np.clip(ink_rgb, 0.05, 0.65)
     fdc_l = (ink_rgb - 0.5) / SH_C0
 
-    lash_out = np.zeros(n_lash, dtype=dtype)
-    lash_out["x"] = cx + dx_l
-    lash_out["y"] = y_l
-    lash_out["z"] = cz + dz_l
-    lash_out["f_dc_0"], lash_out["f_dc_1"], lash_out["f_dc_2"] = fdc_l[0], fdc_l[1], fdc_l[2]
-    lash_out["opacity"] = op_l
-    lash_out["scale_0"] = np.log(r_lash_along)
-    lash_out["scale_1"] = np.log(r_lash_thick)
-    lash_out["scale_2"] = np.log(r_lash_depth)
-    lash_out["rot_0"], lash_out["rot_1"], lash_out["rot_2"], lash_out["rot_3"] = rot_l[:, 0], rot_l[:, 1], rot_l[:, 2], rot_l[:, 3]
+    # Derive stroke thickness from 2D design-art lash_thick_over_deye (scale-invariant)
+    thick_world = float(style.get("lash_thick_over_deye", 0.036)) * d_eye_3d
+    r_thick_base = float(np.clip(0.5 * thick_world, rx * 0.022, rx * 0.052))
 
-    return np.concatenate([skin_out, lash_out], axis=0)
+    # Scale-invariant depth clearance: sits cleanly on top of eyelid skin curtain when blinking,
+    # and flush on face/eyeball surface when open (never floating, never buried!)
+    lash_proud = max(skin_depth_thick * (1.8 + 1.8 * blink), 0.00075 + 0.00065 * blink)
+
+    # Primary stroke + subtle soft upper feather row (clean, continuous, soft-blended anime lash)
+    for row_idx, (dz_off, thick_mul, op_center) in enumerate(((0.0, 1.0, 4.0), (r_thick_base * 0.50 * (1.0 - 0.5 * blink), 0.65, 2.4))):
+        dz_l = dz_l_base + dz_off
+        y_quad_l = coef[0] + coef[1] * dx_l + coef[2] * dz_l + coef[3] * dx_l * dx_l + coef[4] * dx_l * dz_l + coef[5] * dz_l * dz_l
+        y_surf_l, sup_l = _project_to_true_surface(cx + dx_l, cz + dz_l, y_quad_l, is_1d_curve=True)
+        if not sup_l.any():
+            continue
+        # Clip endpoints that would protrude into empty air past the curved cheek silhouette
+        dx_k, dz_k, u_k = dx_l[sup_l], dz_l[sup_l], u_l[sup_l]
+        y_l = y_surf_l[sup_l] - lash_proud
+
+        dy_dx_l = coef[1] + 2.0 * coef[3] * dx_k + coef[4] * dz_k
+        dy_dz_l = coef[2] + coef[4] * dx_k + 2.0 * coef[5] * dz_k
+        nrm_l = np.column_stack([dy_dx_l, -np.ones_like(dx_k), dy_dz_l]).astype(np.float32)
+        nrm_l /= np.maximum(np.linalg.norm(nrm_l, axis=1, keepdims=True), 1e-8)
+        rot_l = normal_to_quat_wxyz(nrm_l)
+
+        u_norm = np.abs(u_k) / max(u_max, 1e-5)
+        taper_l = 1.0 - smoothstep(0.50, 0.98, u_norm)
+        r_lash_thick = (r_thick_base * (0.55 + 0.65 * taper_l) * thick_mul).astype(np.float32)
+        r_lash_along = np.full(len(dx_k), max(rx * 0.044, 0.00055), dtype=np.float32)
+        r_lash_depth = (r_lash_thick * 0.34).astype(np.float32)
+        # Soft natural opacity taper at inner/outer tips so stroke blends into skin instead of looking pasted-on
+        op_l = (op_center * (0.35 + 0.65 * taper_l)).astype(np.float32)
+
+        lash_out = np.zeros(len(dx_k), dtype=dtype)
+        lash_out["x"] = cx + dx_k
+        lash_out["y"] = y_l
+        lash_out["z"] = cz + dz_k
+        lash_out["f_dc_0"], lash_out["f_dc_1"], lash_out["f_dc_2"] = fdc_l[0], fdc_l[1], fdc_l[2]
+        lash_out["opacity"] = op_l
+        lash_out["scale_0"] = np.log(r_lash_along)
+        lash_out["scale_1"] = np.log(r_lash_thick)
+        lash_out["scale_2"] = np.log(r_lash_depth)
+        lash_out["rot_0"], lash_out["rot_1"], lash_out["rot_2"], lash_out["rot_3"] = rot_l[:, 0], rot_l[:, 1], rot_l[:, 2], rot_l[:, 3]
+        parts.append(lash_out)
+
+    return np.concatenate(parts, axis=0) if parts else np.zeros(0, dtype=dtype)
 
 
 def detect_face_skin_mask(xyz: np.ndarray, rgb: np.ndarray, is_body: np.ndarray, surf_L: np.ndarray, surf_R: np.ndarray, face_z_range: list[float]) -> np.ndarray:

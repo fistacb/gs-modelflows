@@ -16,8 +16,8 @@ from harmonic_dqs import SH_C0
 # Standard anime lip-sync & expression presets: (open_amt, width_scale, smile, roundness)
 # roundness: 0.0 = wide/flat (I/E), 0.5 = natural (A), 1.0 = soft rounded oval (U/O)
 MOUTH_PRESETS: dict[str, tuple[float, float, float, float]] = {
-    "closed": (0.00, 0.92, 0.06, 0.30),
-    "smile":  (0.00, 1.04, 0.55, 0.30),
+    "closed": (0.00, 0.86, 0.30, 0.30),
+    "smile":  (0.00, 1.00, 0.62, 0.30),
     "A":      (0.82, 0.86, 0.10, 0.65),
     "I":      (0.28, 1.04, 0.32, 0.25),
     "U":      (0.42, 0.44, 0.00, 1.00),
@@ -258,8 +258,8 @@ def build_procedural_mouth(
     kz = float(meta["kz"])
     skin_rgb = np.asarray(meta["skin_rgb"], np.float32)
     lip_rgb = np.asarray(meta["lip_rgb"], np.float32)
-    # Soft warm rose-brown line (blends naturally into anime skin, never looks like a thick gray cap)
-    lip_soft = np.clip(lip_rgb * 0.58 + skin_rgb * 0.42, 0.30, 0.68).astype(np.float32)
+    # Crisp yet warm rose-brown line (stays clearly visible at 640px video resolution while blending with anime skin)
+    lip_soft = np.clip(lip_rgb * 0.76 + skin_rgb * 0.24, 0.22, 0.58).astype(np.float32)
     s_unit = max(rx_base, 1e-4)
 
     parts = []
@@ -345,14 +345,15 @@ def build_procedural_mouth(
     taper = 0.12 + 0.88 * (np.maximum(0.0, np.sin(math.pi * t_u)) ** 1.10)
 
     dx_ul = ul * rx
-    y_ul = surf_y(dx_ul, dz_u_l) - 0.00010
+    y_ul = surf_y(dx_ul, dz_u_l) - 0.00040
     ul_xyz = np.column_stack([mx + dx_ul, y_ul, mz + dz_u_l]).astype(np.float32)
-    # Thinner, softer line when open on rounded vowels so it never looks like a gray cap
-    line_thick = (0.015 - 0.004 * open_amt * roundness) * s_unit
-    line_op = 3.6 - 1.1 * open_amt * roundness
+    # Clearly readable dainty anime lip line even at 640px video resolution (thinner when open on rounded vowels)
+    base_thick = max(0.048 * s_unit, 0.00050)
+    line_thick = base_thick * (1.0 - 0.45 * open_amt * roundness)
+    line_op = 4.4 - 1.0 * open_amt * roundness
     sp_ul = _make_splats(
         ul_xyz, np.tile(lip_soft[None, :], (n_lip, 1)), np.tile([[0, -1, 0]], (n_lip, 1)),
-        (0.028 * s_unit, 0.020 * s_unit, line_thick), dtype, opacity_logit=float(line_op),
+        (max(0.055 * s_unit, 0.00055), max(0.025 * s_unit, 0.00025), line_thick), dtype, opacity_logit=float(line_op),
     )
     sp_ul["scale_2"] = np.log(np.maximum(1e-5, line_thick * taper)).astype(np.float32)
     parts.append(sp_ul)

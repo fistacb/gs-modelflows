@@ -198,24 +198,45 @@ def main():
     else:
         med_skin_fdc = np.median(skin_fdc, axis=0, keepdims=True).astype(np.float32)
         skin_fdc = (0.35 * skin_fdc + 0.65 * med_skin_fdc).astype(np.float32)
-    skin_scale_med = float(np.median(head_pol_mouth["scale_0"][skin_mask]))
-    rx_e, rz_e = max(eyeball_r * 1.48, 0.42 * D_eye), max(eyeball_r * 1.28, 0.36 * D_eye)
+    skin_scale_med = float(np.median(np.exp(head_pol_mouth["scale_0"][skin_mask])))
+    prop_cfg = cfg.get("proportions", {})
+    if "eyelid_shell_rx_rz" in prop_cfg and len(prop_cfg["eyelid_shell_rx_rz"]) == 2:
+        rx_e, rz_e = float(prop_cfg["eyelid_shell_rx_rz"][0]), float(prop_cfg["eyelid_shell_rx_rz"][1])
+    else:
+        rx_e, rz_e = max(eyeball_r * 1.48, 0.42 * D_eye), max(eyeball_r * 1.28, 0.36 * D_eye)
     dz_cap_L = detect_lash_ceiling_dz(body_xyz, body_rgb, np.ones(n_body, dtype=bool), surf_L, rx_e, rz_e)
     dz_cap_R = detect_lash_ceiling_dz(body_xyz, body_rgb, np.ones(n_body, dtype=bool), surf_R, rx_e, rz_e)
-    lash_top_bot = (rz_e * 0.45, -rz_e * 0.58)
+    if "eyelid_lash_top_bottom_z" in prop_cfg and len(prop_cfg["eyelid_lash_top_bottom_z"]) == 2:
+        lash_top_bot = (float(prop_cfg["eyelid_lash_top_bottom_z"][0]), float(prop_cfg["eyelid_lash_top_bottom_z"][1]))
+    else:
+        lash_top_bot = (rz_e * 0.45, -rz_e * 0.58)
 
     cam_pos_face = np.array([face_cx, -0.76, z_eye], dtype=np.float32)
     drop_delta = max(0.0, 62.0 - arm_drop_rest_deg)
     h_hd_rest = np.asarray(bones["head"]["head"], np.float32)
 
-    # Write GPU base body PLY ONCE + skin weights ONCE + resting eyes/mouth ONCE
+    # Write GPU base body PLY ONCE + skin weights ONCE + resting eyes/lashes/mouth ONCE
     anim_tag = f"qa_suite_{asset_id}_anim"
     anim_dir = spark / "frames" / anim_tag
     anim_dir.mkdir(parents=True, exist_ok=True)
     write_ply(anim_dir / "body_base.ply", to_spark_ply(head_pol_mouth, body_xyz, body_rot))
     (anim_dir / "body_skin.bin").write_bytes(pack_spark_skin_weights(W).tobytes())
 
-    rest_eyes_mouth = np.concatenate([eL, eR, mouth_rest_closed], axis=0)
+    eye_style = skel_v2.get("eye_style")
+    head_ref_xyz = body_xyz[body_op > 0.30]
+    open_lash_L = build_eyelid_shell(
+        pL, surf_L, skin_xyz, skin_fdc, skin_scale_med, 0.0, head_pol.dtype,
+        rx_rz=(rx_e, rz_e), lash_top_bot=lash_top_bot, dz_top_cap=dz_cap_L,
+        face_quad_coef=skel_v2["bones"]["eye_L"]["meta"].get("face_quad_coef"), always_draw_lash=True,
+        eye_style=eye_style, eye_radius=eyeball_r, ref_xyz=head_ref_xyz,
+    )
+    open_lash_R = build_eyelid_shell(
+        pR, surf_R, skin_xyz, skin_fdc, skin_scale_med, 0.0, head_pol.dtype,
+        rx_rz=(rx_e, rz_e), lash_top_bot=lash_top_bot, dz_top_cap=dz_cap_R,
+        face_quad_coef=skel_v2["bones"]["eye_R"]["meta"].get("face_quad_coef"), always_draw_lash=True,
+        eye_style=eye_style, eye_radius=eyeball_r, ref_xyz=head_ref_xyz,
+    )
+    rest_eyes_mouth = np.concatenate([eL, eR, open_lash_L, open_lash_R, mouth_rest_closed], axis=0)
     rem_xyz = np.column_stack([rest_eyes_mouth["x"], rest_eyes_mouth["y"], rest_eyes_mouth["z"]]).astype(np.float32)
     rem_rot = np.column_stack([rest_eyes_mouth["rot_0"], rest_eyes_mouth["rot_1"], rest_eyes_mouth["rot_2"], rest_eyes_mouth["rot_3"]]).astype(np.float32)
     rem_rot /= np.maximum(np.linalg.norm(rem_rot, axis=1, keepdims=True), 1e-8)
@@ -282,9 +303,9 @@ def main():
         R_hd, h_hd, _ = world["head"]
 
         dyn_parts, dyn_xyz_list, dyn_rot_list = [], [], []
-        for bv, e_raw, e_xyz, e_rot, c_e, sc, dz_cap in (
-            (bL, eL, eL_xyz0, eL_rot0, pL, surf_L, dz_cap_L),
-            (bR, eR, eR_xyz0, eR_rot0, pR, surf_R, dz_cap_R),
+        for bv, e_raw, e_xyz, e_rot, c_e, sc, dz_cap, q_coef in (
+            (bL, eL, eL_xyz0, eL_rot0, pL, surf_L, dz_cap_L, skel_v2["bones"]["eye_L"]["meta"].get("face_quad_coef")),
+            (bR, eR, eR_xyz0, eR_rot0, pR, surf_R, dz_cap_R, skel_v2["bones"]["eye_R"]["meta"].get("face_quad_coef")),
         ):
             c_w = h_hd + R_hd @ (c_e - h_hd_rest)
             if locked:
@@ -301,8 +322,14 @@ def main():
                 e_fd["opacity"] = e_fd["opacity"] * (1.0 - occ) - 14.0 * occ
             dyn_parts.append(e_fd); dyn_xyz_list.append(xyz_w); dyn_rot_list.append(rot_w)
 
-            if bv > 0.02:
-                lid = build_eyelid_shell(c_e, sc, skin_xyz, skin_fdc, skin_scale_med, bv, head_pol.dtype, rx_rz=(rx_e, rz_e), lash_top_bot=lash_top_bot, dz_top_cap=dz_cap)
+            # Always draw single-source upper eyelash (and skin curtain only when bv > 0.03) so open eyes stay crisp
+            lid = build_eyelid_shell(
+                c_e, sc, skin_xyz, skin_fdc, skin_scale_med, bv, head_pol.dtype,
+                rx_rz=(rx_e, rz_e), lash_top_bot=lash_top_bot, dz_top_cap=dz_cap,
+                face_quad_coef=q_coef, always_draw_lash=True,
+                eye_style=eye_style, eye_radius=eyeball_r, ref_xyz=head_ref_xyz,
+            )
+            if len(lid) > 0:
                 l_xyz = np.column_stack([lid["x"], lid["y"], lid["z"]]).astype(np.float32)
                 l_rot = np.column_stack([lid["rot_0"], lid["rot_1"], lid["rot_2"], lid["rot_3"]]).astype(np.float32)
                 l_xyz_w = h_hd[None, :] + (l_xyz - h_hd_rest[None, :]) @ R_hd.T

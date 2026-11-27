@@ -43,7 +43,7 @@ def normal_to_quat_wxyz(normals: np.ndarray) -> np.ndarray:
 
 
 def derive_iris_palette(cfg_colors: dict, src_ply: Path | None, skel: dict) -> dict:
-    """Use config palette or auto-sample dominant iris hue from the source PLY eye region."""
+    """Use 2D design-art eye_style palette from skeleton.json (when auto_sample enabled), else config/3D fallback."""
     pal = {
         "bot": np.array(cfg_colors["iris_bottom_rgb"], dtype=np.float32),
         "mid": np.array(cfg_colors["iris_mid_rgb"], dtype=np.float32),
@@ -52,6 +52,16 @@ def derive_iris_palette(cfg_colors: dict, src_ply: Path | None, skel: dict) -> d
         "pupil": np.array(cfg_colors["pupil_rgb"], dtype=np.float32),
         "rim": np.array(cfg_colors["rim_rgb"], dtype=np.float32),
     }
+    eye_style = skel.get("eye_style", {})
+    if cfg_colors.get("auto_sample_iris_from_source", True) and "iris_bottom_rgb" in eye_style and "iris_mid_rgb" in eye_style:
+        pal["top"] = np.array(eye_style["iris_top_rgb"], dtype=np.float32)
+        pal["mid"] = np.array(eye_style["iris_mid_rgb"], dtype=np.float32)
+        pal["bot"] = np.array(eye_style["iris_bottom_rgb"], dtype=np.float32)
+        pal["glow"] = np.array(eye_style["iris_glow_rgb"], dtype=np.float32)
+        pal["pupil"] = np.clip(pal["top"] * 0.65, 0.04, 0.40)
+        pal["rim"] = np.clip(pal["top"] * 0.85, 0.06, 0.45)
+        print(f"[AutoIris2D] Using design-art gradient top={pal['top'].round(3).tolist()} mid={pal['mid'].round(3).tolist()} bot={pal['bot'].round(3).tolist()} glow={pal['glow'].round(3).tolist()}")
+        return pal
     if cfg_colors.get("auto_sample_iris_from_source") and src_ply and src_ply.exists():
         d, _ = read_ply(src_ply)
         xyz = np.column_stack([d["x"], d["y"], d["z"]]).astype(np.float32)
@@ -79,17 +89,27 @@ def derive_iris_palette(cfg_colors: dict, src_ply: Path | None, skel: dict) -> d
     return pal
 
 
-def build_eyeball_ply(radius: float, sclera_rgb: np.ndarray, pal: dict, n_back: int = 1400, n_front: int = 3600, white_only: bool = False, cheek_yaw_deg: float = 0.0) -> np.ndarray:
+def build_eyeball_ply(
+    radius: float,
+    sclera_rgb: np.ndarray,
+    pal: dict,
+    n_back: int = 1600,
+    n_front: int = 3600,
+    white_only: bool = False,
+    cheek_yaw_deg: float = 0.0,
+    cheek_pitch_deg: float = 0.0,
+    iris_rx_rz_deg: tuple[float, float] = (40.0, 48.0),
+) -> np.ndarray:
     n_full = fibonacci_sphere(n_back)
-    n_b = n_full[n_full[:, 1] > -float(np.cos(np.radians(70.0)))]
-    n_f = fibonacci_front_cap(n_front, max_angle_deg=72.0)
+    n_b = n_full[n_full[:, 1] > -float(np.cos(np.radians(74.0)))]
+    n_f = fibonacci_front_cap(n_front, max_angle_deg=76.0)
 
     normals = np.concatenate([n_b, n_f], axis=0)
     n_total = len(normals)
     xyz = normals * float(radius)
 
-    r_disc_b = float(np.sqrt((4.0 * np.pi * (radius ** 2) / n_back) / np.pi) * 1.18)
-    cap_area = 2.0 * np.pi * (radius ** 2) * (1.0 - np.cos(np.radians(72.0)))
+    r_disc_b = float(np.sqrt((4.0 * np.pi * (radius ** 2) / n_back) / np.pi) * 1.20)
+    cap_area = 2.0 * np.pi * (radius ** 2) * (1.0 - np.cos(np.radians(76.0)))
     r_disc_f = float(np.sqrt((cap_area / n_front) / np.pi) * 1.15)
     r_disc = np.concatenate([np.full(len(n_b), r_disc_b, dtype=np.float32), np.full(len(n_f), r_disc_f, dtype=np.float32)])
 
@@ -97,16 +117,18 @@ def build_eyeball_ply(radius: float, sclera_rgb: np.ndarray, pal: dict, n_back: 
     scale = np.column_stack([np.log(r_disc), np.log(r_disc), np.log(r_disc * 0.25)]).astype(np.float32)
 
     front_y = np.maximum(-normals[:, 1], 1e-5)
-    # Offset iris center by cheek_yaw_deg so eyeball hugs curved cheek while gaze faces straight forward (-Y)
-    ax = np.degrees(np.arctan2(normals[:, 0], front_y)) - float(cheek_yaw_deg)
+    # Paint iris straight forward (-Y) so rest gaze is strictly parallel and look_at_eye_rot converges cleanly on camera
+    # (offsetting ax by +/-cheek_yaw_deg caused outward wall-eyed divergence!).
+    ax = np.degrees(np.arctan2(normals[:, 0], front_y))
     az = np.degrees(np.arctan2(normals[:, 2], front_y))
     is_front = normals[:, 1] < 0.0
 
     rgb = np.tile(sclera_rgb.astype(np.float32)[None, :], (n_total, 1))
-    rgb *= (1.0 - 0.18 * smoothstep(8.0, 42.0, az))[:, None]
+    rgb *= (1.0 - 0.16 * smoothstep(8.0, 44.0, az))[:, None]
 
     if not white_only:
-        az_c, rx_iris, rz_iris = 0.0, 36.0, 44.0
+        az_c = 0.0
+        rx_iris, rz_iris = float(iris_rx_rz_deg[0]), float(iris_rx_rz_deg[1])
         d_iris = np.sqrt((ax / rx_iris) ** 2 + ((az - az_c) / rz_iris) ** 2)
         t_v = np.clip((az - (az_c - rz_iris)) / (2.0 * rz_iris), 0.0, 1.0)
         iris_col = np.where(
@@ -114,26 +136,32 @@ def build_eyeball_ply(radius: float, sclera_rgb: np.ndarray, pal: dict, n_back: 
             pal["bot"][None, :] * (1.0 - (t_v / 0.45)[:, None]) + pal["mid"][None, :] * (t_v / 0.45)[:, None],
             pal["mid"][None, :] * (1.0 - ((t_v - 0.45) / 0.55)[:, None]) + pal["top"][None, :] * ((t_v - 0.45) / 0.55)[:, None],
         )
-        d_glow = np.sqrt((ax / 24.0) ** 2 + ((az - (az_c - 18.0)) / 14.0) ** 2)
-        w_glow = (1.0 - smoothstep(0.3, 1.0, d_glow)) * 0.45
+        # Rich luminous lower-iris anime crescent glow (gives warm, gentle, sparkling look!)
+        d_glow = np.sqrt((ax / (rx_iris * 0.72)) ** 2 + ((az - (az_c - rz_iris * 0.40)) / (rz_iris * 0.44)) ** 2)
+        w_glow = (1.0 - smoothstep(0.15, 1.0, d_glow)) * 0.84
         iris_col = iris_col * (1.0 - w_glow[:, None]) + pal["glow"][None, :] * w_glow[:, None]
 
-        d_pupil = np.sqrt((ax / 14.5) ** 2 + ((az - (az_c + 1.0)) / 18.5) ** 2)
-        w_pupil = 1.0 - smoothstep(0.65, 1.05, d_pupil)
+        # Slightly smaller, softly-blended pupil so the eyes look warm and friendly (not stark/intense)
+        d_pupil = np.sqrt((ax / (rx_iris * 0.30)) ** 2 + ((az - (az_c + 1.5)) / (rz_iris * 0.32)) ** 2)
+        w_pupil = (1.0 - smoothstep(0.55, 1.05, d_pupil)) * 0.90
         iris_col = iris_col * (1.0 - w_pupil[:, None]) + pal["pupil"][None, :] * w_pupil[:, None]
 
-        w_rim = smoothstep(0.80, 0.94, d_iris) * (1.0 - smoothstep(0.96, 1.06, d_iris))
-        iris_col = iris_col * (1.0 - 0.65 * w_rim[:, None]) + pal["rim"][None, :] * (0.65 * w_rim[:, None])
+        w_rim = smoothstep(0.78, 0.94, d_iris) * (1.0 - smoothstep(0.96, 1.06, d_iris))
+        iris_col = iris_col * (1.0 - 0.62 * w_rim[:, None]) + pal["rim"][None, :] * (0.62 * w_rim[:, None])
 
         w_iris = (1.0 - smoothstep(0.95, 1.05, d_iris)) * is_front.astype(np.float32)
         rgb = rgb * (1.0 - w_iris[:, None]) + iris_col * w_iris[:, None]
 
-        for hx, hz, r0, r1, col in [(-16.0, az_c + 16.0, 6.0, 9.2, [0.99, 0.98, 0.96]), (13.5, az_c - 15.0, 3.0, 5.2, [0.99, 0.94, 0.92])]:
+        for hx, hz, r0, r1, col in [
+            (-rx_iris * 0.34, az_c + rz_iris * 0.28, 7.2, 11.2, [1.00, 0.99, 0.98]),
+            (rx_iris * 0.30, az_c - rz_iris * 0.32, 3.8, 6.2, [1.00, 0.96, 0.92]),
+        ]:
             w_hl = (1.0 - smoothstep(r0, r1, np.hypot(ax - hx, az - hz))) * is_front.astype(np.float32)
             rgb = rgb * (1.0 - w_hl[:, None]) + np.array(col, dtype=np.float32)[None, :] * w_hl[:, None]
 
-    # Trim rear hemisphere splats so oblique views (+60 deg) never poke through cheek/temple
-    keep = (normals[:, 1] < -0.35) & (np.abs(ax) < 58.0) & (np.abs(az) < 52.0)
+    # Keep wide sclera coverage (~74 deg H / ~64 deg V) so gaze +/-18 deg & +60 deg never show jagged edges,
+    # while trimming rear hemisphere so it never pokes through cheek/temple.
+    keep = (normals[:, 1] < -0.15) & (np.abs(ax) < 74.0) & (np.abs(az) < 64.0)
     xyz, rgb, scale, rot = xyz[keep], rgb[keep], scale[keep], rot[keep]
     n_kept = len(xyz)
 
@@ -175,15 +203,27 @@ def main():
     rgb_R = np.array(skel["bones"]["eye_R"]["meta"]["sclera_rgb"], dtype=np.float32)
     sclera_rgb = np.clip(0.5 * (0.5 * (rgb_L + rgb_R)) + 0.5 * np.array([0.93, 0.91, 0.89], dtype=np.float32), 0.0, 0.96)
 
+    eye_style = skel.get("eye_style", {})
+    cfg_iris = cfg.get("proportions", {}).get("iris_rx_rz_deg")
+    if cfg.get("colors", {}).get("auto_sample_iris_from_source", True) and "iris_rx_rz_deg" in eye_style:
+        iris_rx_rz = tuple(float(v) for v in eye_style["iris_rx_rz_deg"])
+    elif cfg_iris is not None:
+        iris_rx_rz = tuple(float(v) for v in cfg_iris)
+    else:
+        iris_rx_rz = (44.0, 52.0)
     suffix = "_white" if args.white_only else ""
     for eye_name in ("eye_L", "eye_R"):
         meta = skel["bones"][eye_name]["meta"]
         r = float(meta["eyeball_radius"])
         cyaw = float(meta.get("cheek_yaw_deg", 0.0))
-        arr = build_eyeball_ply(r, sclera_rgb, pal, white_only=args.white_only, cheek_yaw_deg=cyaw)
+        cpitch = float(meta.get("cheek_pitch_deg", 0.0))
+        arr = build_eyeball_ply(
+            r, sclera_rgb, pal, white_only=args.white_only,
+            cheek_yaw_deg=cyaw, cheek_pitch_deg=cpitch, iris_rx_rz_deg=iris_rx_rz,
+        )
         out_path = out_dir / f"step4_{eye_name}{suffix}_local.ply"
         write_ply(out_path, arr)
-        print(f"Saved {out_path} ({len(arr)} splats, r={r:.4f})")
+        print(f"Saved {out_path} ({len(arr)} splats, r={r:.4f}, iris={iris_rx_rz})")
 
 
 if __name__ == "__main__":

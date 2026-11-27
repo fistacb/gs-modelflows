@@ -40,7 +40,72 @@ def main():
         counts[eye_name] = int(m.sum())
         exclude |= m
 
-    carved = data[~exclude]
+    carved = data[~exclude].copy()
+
+    # Neutralize old blurry TripoSplat upper-eyelash / upper-lid-crease band right above each socket
+    # using character-adaptive skin & 2D-extracted lash color distances (no hardcoded luminance thresholds!),
+    # while preserving foreground bangs via depth separation from the fitted face surface.
+    xyz_n = np.column_stack([carved["x"], carved["y"], carved["z"]]).astype(np.float32)
+    fdc_n = np.column_stack([carved["f_dc_0"], carved["f_dc_1"], carved["f_dc_2"]]).astype(np.float32)
+    rgb_n = np.clip(0.5 + 0.28209479177387814 * fdc_n, 0.0, 1.0)
+    lum_n = 0.299 * rgb_n[:, 0] + 0.587 * rgb_n[:, 1] + 0.114 * rgb_n[:, 2]
+    op_n = 1.0 / (1.0 + np.exp(-np.clip(carved["opacity"], -20, 20)))
+    sc_n = np.exp(carved["scale_0"])
+    eye_style = skel.get("eye_style", {})
+    lash_ref = np.asarray(eye_style.get("lash_rgb", [0.28, 0.16, 0.14]), dtype=np.float32)
+    neutralized_upper = 0
+    for eye_name in ("eye_L", "eye_R"):
+        meta = skel["bones"][eye_name]["meta"]
+        sc = np.array(meta["surface_center"], dtype=np.float32)
+        r = np.array(meta["exclusion_radius"], dtype=np.float32)
+        q_coef = meta.get("face_quad_coef")
+        # Sample clean local cheek skin right below the eye
+        m_sk = (
+            (op_n > 0.30) & (lum_n > 0.55) & (rgb_n[:, 0] >= rgb_n[:, 2] + 0.02)
+            & (np.abs(xyz_n[:, 0] - sc[0]) < r[0] * 1.6)
+            & (xyz_n[:, 2] > sc[2] - r[2] * 2.2) & (xyz_n[:, 2] < sc[2] - r[2] * 0.5)
+            & (xyz_n[:, 1] < sc[1] + 0.018)
+        )
+        if m_sk.sum() >= 10:
+            sk_rgb = np.median(rgb_n[m_sk], axis=0).astype(np.float32)
+            sk_lum = float(np.median(lum_n[m_sk]))
+            sk_std = float(max(np.std(lum_n[m_sk]), 0.03))
+            sk_scale = float(np.median(sc_n[m_sk]))
+            sk_fdc = (sk_rgb * 0.97 - 0.5) / 0.28209479177387814
+
+            # Expected face surface Y for depth gating (protects foreground bangs in front of skin!)
+            dx_q = xyz_n[:, 0] - sc[0]
+            dz_q = xyz_n[:, 2] - sc[2]
+            if q_coef is not None and len(q_coef) == 6:
+                y_face = (
+                    q_coef[0] + q_coef[1] * dx_q + q_coef[2] * dz_q
+                    + q_coef[3] * dx_q * dx_q + q_coef[4] * dx_q * dz_q + q_coef[5] * dz_q * dz_q
+                )
+            else:
+                y_face = np.full(len(xyz_n), sc[1], dtype=np.float32)
+
+            # Adaptive color match: either closer to character's 2D lash color than to skin,
+            # or noticeably darker than local skin (handles warm-brown, grey, or black upper-lash remnants)
+            d_lash = np.linalg.norm(rgb_n - lash_ref[None, :], axis=1)
+            d_skin = np.linalg.norm(rgb_n - sk_rgb[None, :], axis=1)
+            is_lash_tone = (d_lash < d_skin * 1.15) | (lum_n < sk_lum - max(0.24 * sk_lum, 3.0 * sk_std))
+
+            # Inner band (direct upper lash arch, z/rz in [0.35, 1.32]): neutralize old lash smudge completely,
+            # while keeping real eyebrows above z/rz > 1.36 untouched!
+            in_depth = (xyz_n[:, 1] >= y_face - max(3.2 * sk_scale, 0.0060)) & (xyz_n[:, 1] <= y_face + 0.016)
+            m_old_lash = (
+                (np.abs(dx_q) < r[0] * 1.24)
+                & (dz_q >= r[2] * 0.35) & (dz_q <= r[2] * 1.32)
+                & in_depth
+                & (is_lash_tone | (lum_n < sk_lum * 0.80))
+            )
+            if m_old_lash.any():
+                carved["f_dc_0"][m_old_lash] = sk_fdc[0]
+                carved["f_dc_1"][m_old_lash] = sk_fdc[1]
+                carved["f_dc_2"][m_old_lash] = sk_fdc[2]
+                neutralized_upper += int(m_old_lash.sum())
+    if neutralized_upper > 0:
+        print(f"[SocketCleanup] Neutralized {neutralized_upper} old upper-lash/crease splats to forehead skin (adaptive)")
 
     # Add smooth cheek-fitted lower-eyelid blend cushion so there is zero indentation under the eyes
     op_c = 1.0 / (1.0 + np.exp(-np.clip(carved["opacity"], -20, 20)))
