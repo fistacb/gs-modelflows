@@ -65,6 +65,13 @@
 
 - **出力検証結果（`hood01_lantern_32mm_fdm.stl`）**: `nonmanifold_edges = 0` · `components = 1` · `min_z = 0.0 mm` · 外寸 `32.0 × 31.9 × 44.2 mm` · FDM `0.4 mm` ノズル肉厚監査（`p05 = 0.45 mm` / 中央値 `1.47 mm` / 1 ノズル未満 `2.8%`）
 
+### 1 枚のプロップシート → 32 点一括 3DGS 量産（`gs-modeling` `mode: static_prop`）
+黒背景・白背景・透過背景に複数の小道具を並べた 1 枚絵から、`batch_static_props.py` で**隣のプロップ混入なしの自動マスク分割 → ComfyUI / TripoSplat 連続生成（8GB VRAM 向け自動監視＆予防再起動つき）→ 正立 Z-up・実寸スケール・底面 `Z=0` ピボット・`meta.json` 付き `v1_prop/` 一括凍結 → Spark 3DGS 一覧コンタクトシート出力**まで一気に量産できます：
+
+<p align="center">
+  <img src="docs/assets/showcase/12_forest_pack_32_3dgs.jpg" width="760" alt="1 枚のプロップシートから一括生成した森の 3DGS 小道具 32 点セット" />
+</p>
+
 ### エージェントへの指示例（使い方イメージ）
 **Antigravity** / **Claude Code** / **Codex** にスキルを導入した状態で、2D 画像を添付して自然言語で依頼するだけで実行できます：
 

@@ -61,6 +61,7 @@ def main() -> None:
     parser.add_argument("--target-height-m", type=float, default=1.0, help="Real-world target Z height in meters (e.g. 0.75 for chest, 2.8 for lamp).")
     parser.add_argument("--pivot", choices=("bottom_center", "center"), default="bottom_center", help="Origin placement convention.")
     parser.add_argument("--yaw-deg", type=float, default=0.0, help="Optional Z-axis yaw rotation in degrees to align front to -Y.")
+    parser.add_argument("--from-triposplat", action="store_true", help="Convert raw TripoSplat axes (front=+X, up=-Y) to Blender Z-up (front=-Y, up=+Z) before cleanup/scaling.")
     parser.add_argument("--clean", action="store_true", help="Run remove_detached micro-floater cleanup before packaging.")
     parser.add_argument("--min-opacity", type=float, default=0.15, help="Visibility threshold for bounds & footprint calculation.")
     parser.add_argument("--render-qa", action="store_true", help="Render an 8-view preview sheet via Spark (render_views.py).")
@@ -76,6 +77,21 @@ def main() -> None:
     finite = np.isfinite(xyz_check).all(axis=1)
     if not finite.all():
         data = data[finite].copy()
+
+    # Optional raw TripoSplat (front=+X, up=-Y) -> Blender Z-up (front=-Y, up=+Z) conversion
+    if args.from_triposplat:
+        R_ts = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]], dtype=np.float64)
+        q_ts_xyzw = Rotation.from_matrix(R_ts).as_quat()
+        q_ts = np.array([q_ts_xyzw[3], q_ts_xyzw[0], q_ts_xyzw[1], q_ts_xyzw[2]], dtype=np.float32)
+        xyz_ts = (np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float32) @ R_ts.T).astype(np.float32)
+        rot_ts = np.column_stack([data["rot_0"], data["rot_1"], data["rot_2"], data["rot_3"]]).astype(np.float32)
+        rn_ts = np.linalg.norm(rot_ts, axis=1, keepdims=True)
+        rot_ts = np.where(rn_ts > 1e-8, rot_ts / np.maximum(rn_ts, 1e-8), np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+        rot_ts = quat_mul_wxyz(q_ts, rot_ts)
+        rot_ts /= np.maximum(np.linalg.norm(rot_ts, axis=1, keepdims=True), 1e-8)
+        data = data.copy()
+        data["x"], data["y"], data["z"] = xyz_ts[:, 0], xyz_ts[:, 1], xyz_ts[:, 2]
+        data["rot_0"], data["rot_1"], data["rot_2"], data["rot_3"] = rot_ts[:, 0], rot_ts[:, 1], rot_ts[:, 2], rot_ts[:, 3]
 
     cleanup_report = None
     if args.clean:

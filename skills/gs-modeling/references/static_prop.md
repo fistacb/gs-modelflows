@@ -29,10 +29,45 @@ python skills/gs-modeling/scripts/build_static_prop.py \
   --render-qa
 ```
 
+> **TripoSplat 生 PLY から直接パッケージ化する場合**: `step1_normalize.py` を経由せず `raw.ply` を直接渡す場合は `--from-triposplat` を付けると、TripoSplat 座標系（`front=+X, up=-Y`）から Blender 標準（`front=-Y, up=+Z`）への正立回転を自動適用したうえでクリーンアップ・実寸化・`Z=0` 接地を行います。
+
 ### 出力構成（`v1_prop/`）
 - `prop.ply`: `Z-up / -Y-forward / 底面中央ピボット / 実寸（m）` 済み 3DGS
 - `meta.json`: 実寸外寸（`dimensions_m`）、`bbox_min_m` / `bbox_max_m`、`footprint_radius_m`、`collision_cylinder`（`gs-stage` の `anchor` 配置・当たり判定に直結）
 - `preview_8view.png`: 8 方向ターンアラウンド確認シート（`--render-qa` 指定時）
+
+---
+
+## 複数プロップ一括量産（1 枚のシート画像 → `v1_prop/` 群）
+
+白背景・黒背景・透過背景に複数の小道具が重ならずに並んだ **プロップシート 1 枚** から、`batch_static_props.py` を使って **自動分割 → TripoSplat 連続生成 → 全点 `v1_prop/` 凍結 → Spark 3DGS 一覧コンタクトシート出力** まで一気通貫で量産できます（レジューム対応）。
+
+### 1. 自動分割のみ先に実行して名前・実寸（m）を編集する（推奨）
+```bash
+python skills/gs-modeling/scripts/batch_static_props.py \
+  --sheet work/forest_pack/sheet.jpg \
+  --out-root work/forest_pack \
+  --bg auto \
+  --phase split
+```
+- `work/forest_pack/input_sheet.png` と `manifest.json` が出力される。必要に応じて `manifest.json` の `name`・`target_height_m`・`num_gaussians` を編集する。
+
+### 2. 一括生成 ＆ 一括パッケージ化（8GB VRAM 安定運用）
+```bash
+python skills/gs-modeling/scripts/batch_static_props.py \
+  --out-root work/forest_pack \
+  --phase all \
+  --seed 46 \
+  --comfy-python <venv>/python.exe \
+  --comfy-main <ComfyUI>/main.py \
+  --comfy-base-dir <work_root> \
+  --comfy-extra-paths <model-paths.yaml> \
+  --recycle-every 2 \
+  --spark-dir <spark_demo>
+```
+- **2 フェーズ自動分離（メモリ安全）**: 先に ComfyUI で全点の `raw_s<seed>.ply` を生成し終えてから ComfyUI を停止して RAM を解放し、その後まとめて `build_static_prop.py --from-triposplat --clean` と Spark 一覧シート（`props_3dgs_sheet.png`）を実行する。
+- **`--recycle-every 2`（`comfy_aimdo` 対策）**: 8 GB VRAM / 16 GB RAM 環境で異なる画像を連続投入すると `comfy_aimdo` が 3 点目付近で落ちることがあるため、管理モードでは 2 点ごとに ComfyUI を予防再起動しつつレジューム続行する。
+- **注意**: ComfyUI の `--base-directory` 配下の `temp/` は起動時に ComfyUI 自身が自動削除するため、バッチスクリプトや作業ファイルは `work/<pack>/` 側に置く。
 
 ---
 

@@ -64,6 +64,13 @@ Using the same Harmonic DQS skeleton, you can pose the character with custom 3DG
 
 - **Verified Print Output (`hood01_lantern_32mm_fdm.stl`)**: `nonmanifold_edges = 0` · `components = 1` · `min_z = 0.0 mm` · `32.0 × 31.9 × 44.2 mm` · FDM `0.4 mm` nozzle audit (`p05 = 0.45 mm`, `median = 1.47 mm`, `< 1 nozzle = 2.8%`).
 
+### Batch Prop-Sheet → 32 Static 3DGS Assets (`gs-modeling`, `mode: static_prop`)
+Given a single multi-object prop sheet (black, white, or transparent background), `batch_static_props.py` auto-segments every non-overlapping prop with neighbor-free masks, runs resumable ComfyUI / TripoSplat batch generation (with proactive process recycling for 8 GB GPUs), converts each to upright Blender Z-up with real-world height scaling, `Z = 0` bottom-center pivot, and `meta.json` (`v1_prop/`), and renders an upright 3DGS contact sheet:
+
+<p align="center">
+  <img src="docs/assets/showcase/12_forest_pack_32_3dgs.jpg" width="760" alt="32 forest village 3DGS static props batch-generated from a single 2D prop sheet" />
+</p>
+
 ### Example Agent Prompts (How to Use)
 Once installed in **Antigravity**, **Claude Code**, or **Codex**, just attach a 2D character image and ask naturally:
 
