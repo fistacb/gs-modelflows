@@ -48,6 +48,10 @@ tmp/
 *.jpeg
 *.webp
 
+# Allow curated README showcase media
+!docs/assets/
+!docs/assets/**
+
 # OS / Editor
 .DS_Store
 Thumbs.db
