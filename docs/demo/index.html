@@ -646,17 +646,53 @@
 
   function queryNav(x, y, curZ) {
     const b = nav.bounds;
-    const ix = Math.round((x - b.x_min) / nav.grid_res_m);
-    const iy = Math.round((y - b.y_min) / nav.grid_res_m);
-    if (ix < 0 || ix >= nav.nx || iy < 0 || iy >= nav.ny) return null;
-    const sps = navGrid[iy][ix];
-    if (!sps || sps.length === 0) return null;
-    let best = null, bestDz = 999;
-    for (const sp of sps) {
-      const dz = Math.abs(sp.z - curZ);
-      if (dz <= 0.62 && dz < bestDz) { best = sp; bestDz = dz; }
+    const fx = (x - b.x_min) / nav.grid_res_m;
+    const fy = (y - b.y_min) / nav.grid_res_m;
+    const ix0 = Math.round(fx), iy0 = Math.round(fy);
+    let best = null, bestScore = 999;
+    // Check target cell first, then immediate neighbors to avoid micro-snags on diagonal edges
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const ix = ix0 + dx, iy = iy0 + dy;
+        if (ix < 0 || ix >= nav.nx || iy < 0 || iy >= nav.ny) continue;
+        if (dx !== 0 || dy !== 0) {
+          // Only allow neighbor fallback if very close to cell border
+          const cx = b.x_min + ix * nav.grid_res_m;
+          const cy = b.y_min + iy * nav.grid_res_m;
+          if (Math.hypot(x - cx, y - cy) > nav.grid_res_m * 0.78) continue;
+        }
+        const sps = navGrid[iy][ix];
+        if (!sps || sps.length === 0) continue;
+        for (const sp of sps) {
+          const dz = Math.abs(sp.z - curZ);
+          if (dz <= 0.72) {
+            const score = dz + (dx === 0 && dy === 0 ? 0.0 : 0.15);
+            if (score < bestScore) { best = sp; bestScore = score; }
+          }
+        }
+      }
     }
     return best;
+  }
+
+  // Smooth multi-angle wall-sliding so character glides along walls, bridge piers & stairs without snagging
+  function moveWithSlide(vx, vy, dt) {
+    const speed = Math.hypot(vx, vy);
+    if (speed < 1e-4) return false;
+    const baseAng = Math.atan2(vy, vx);
+    const tryAngles = [0, 0.38, -0.38, 0.78, -0.78, 1.18, -1.18];
+    for (const da of tryAngles) {
+      const a = baseAng + da;
+      const scale = Math.cos(da); // preserve projected speed along wall
+      const nx = state.charPos[0] + Math.cos(a) * speed * scale * dt;
+      const ny = state.charPos[1] + Math.sin(a) * speed * scale * dt;
+      const sp = queryNav(nx, ny, state.charPos[2]);
+      if (sp) {
+        state.charPos = [nx, ny, lerp(state.charPos[2], sp.z, 0.42)];
+        return true;
+      }
+    }
+    return false;
   }
 
   // ---- Time-of-Day Lighting Curves ----
@@ -805,25 +841,22 @@
   joystick.addEventListener('pointerup', endJoy);
   joystick.addEventListener('pointercancel', endJoy);
 
-  // Tap/Drag on Canvas to walk toward finger/cursor
+  // Tap/Drag on Canvas to walk smoothly to tapped point (stays active after tap release!)
   let canvasPtr = null;
+  let tapStuckTime = 0;
   function setTapFromEvent(e) {
     if (!meta) return;
     const rect = canvas.getBoundingClientRect();
     const u = (e.clientX - rect.left) / rect.width * meta.width;
     const v = (e.clientY - rect.top) / rect.height * meta.height;
-    // Project character's current screen pos and walk in that screen direction!
-    const cp = jsProj2d(state.charPos);
-    const sdx = u - cp[0], sdy = v - cp[1];
-    if (Math.hypot(sdx, sdy) > 10) {
-      if (state.autoWalk) { state.autoWalk = false; syncUI(); }
-      state.tapTarget = [u, v];
-    }
+    if (state.autoWalk) { state.autoWalk = false; syncUI(); }
+    state.tapTarget = [u, v];
+    tapStuckTime = 0;
   }
   canvas.addEventListener('pointerdown', (e) => { canvasPtr = e.pointerId; canvas.setPointerCapture(canvasPtr); setTapFromEvent(e); });
   canvas.addEventListener('pointermove', (e) => { if (e.pointerId === canvasPtr) setTapFromEvent(e); });
-  canvas.addEventListener('pointerup', (e) => { if (e.pointerId === canvasPtr) { canvasPtr = null; state.tapTarget = null; } });
-  canvas.addEventListener('pointercancel', () => { canvasPtr = null; state.tapTarget = null; });
+  canvas.addEventListener('pointerup', (e) => { if (e.pointerId === canvasPtr) { canvasPtr = null; } });
+  canvas.addEventListener('pointercancel', () => { canvasPtr = null; });
 
   // ---- Camera Basis (matches Python) ----
   let camTw, camB, camTarget, camFwd, camRight, camUp, fxVal;
@@ -933,31 +966,35 @@
           const cp = jsProj2d(state.charPos);
           const dx = state.tapTarget[0] - cp[0], dy = state.tapTarget[1] - cp[1];
           const dd = Math.hypot(dx, dy);
-          if (dd > 14) { sx = dx / dd; sy = dy / dd; }
+          if (dd > 18) { sx = dx / dd; sy = dy / dd; }
+          else { state.tapTarget = null; }
         }
         const mag = Math.hypot(sx, sy);
-        if (mag > 0.08) {
-          sx /= Math.max(mag, 1.0); sy /= Math.max(mag, 1.0);
+        if (mag > 0.06) {
+          const eff = Math.min(mag / 0.65, 1.0);
+          sx /= Math.max(mag, 1e-4); sy /= Math.max(mag, 1e-4);
           // Use exact camera horizontal basis in Blender XY (tw = [x, z, -y])
           const rLen = Math.hypot(camRight[0], -camRight[2]);
           const fLen = Math.hypot(camFwd[0], -camFwd[2]);
           const rightX = camRight[0] / rLen, rightY = -camRight[2] / rLen;
           const fwdX = camFwd[0] / fLen, fwdY = -camFwd[2] / fLen;
-          const vx = (sx * rightX - sy * fwdX) * 2.15;
-          const vy = (sx * rightY - sy * fwdY) * 2.15;
-          const nx = state.charPos[0] + vx * dt;
-          const ny = state.charPos[1] + vy * dt;
-          const spBoth = queryNav(nx, ny, state.charPos[2]);
-          if (spBoth) {
-            state.charPos = [nx, ny, lerp(state.charPos[2], spBoth.z, 0.35)];
+          const speed = 2.85 * eff;
+          const vx = (sx * rightX - sy * fwdX) * speed;
+          const vy = (sx * rightY - sy * fwdY) * speed;
+          const moved = moveWithSlide(vx, vy, dt);
+          if (moved) {
+            tapStuckTime = 0;
+            state.charYaw = (Math.atan2(vx, -vy) * 180 / Math.PI + 360) % 360;
+            state.walkPhase = (state.walkPhase + dt * 11.5 * eff) % 8.0;
           } else {
-            const spX = queryNav(nx, state.charPos[1], state.charPos[2]);
-            const spY = queryNav(state.charPos[0], ny, state.charPos[2]);
-            if (spX) state.charPos = [nx, state.charPos[1], lerp(state.charPos[2], spX.z, 0.35)];
-            else if (spY) state.charPos = [state.charPos[0], ny, lerp(state.charPos[2], spY.z, 0.35)];
+            state.charYaw = (Math.atan2(vx, -vy) * 180 / Math.PI + 360) % 360;
+            if (state.tapTarget) {
+              tapStuckTime += dt;
+              if (tapStuckTime > 0.30) { state.tapTarget = null; tapStuckTime = 0; }
+            }
           }
-          state.charYaw = (Math.atan2(vx, -vy) * 180 / Math.PI + 360) % 360;
-          state.walkPhase = (state.walkPhase + dt * 10.5 * Math.min(mag, 1.0)) % 8.0;
+        } else {
+          state.walkPhase = 0.0; // clean idle stance when stopped
         }
       }
 
