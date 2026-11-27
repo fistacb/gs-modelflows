@@ -49,15 +49,20 @@ RAW_TO_BLENDER = np.array(
 )
 
 
-def fill_volume(surface: np.ndarray, radius: int) -> tuple[np.ndarray, list[int]]:
-    structure = ndi.generate_binary_structure(3, 2)
+def fill_volume(surface: np.ndarray, radius: int, scanline_fill: bool = False) -> tuple[np.ndarray, list[int]]:
+    structure = ndi.generate_binary_structure(3, 1)
     closed = ndi.binary_closing(surface, structure=structure, iterations=max(1, radius)) if radius > 0 else surface.copy()
-    interior = closed.copy()
-    for axis in range(3):
-        forward = np.maximum.accumulate(closed, axis=axis)
-        backward = np.flip(np.maximum.accumulate(np.flip(closed, axis=axis), axis=axis), axis=axis)
-        interior = (forward & backward) if axis == 0 else (interior & forward & backward)
-    filled = ndi.binary_fill_holes(closed | interior)
+    if scanline_fill:
+        interior = closed.copy()
+        for axis in range(3):
+            forward = np.maximum.accumulate(closed, axis=axis)
+            backward = np.flip(np.maximum.accumulate(np.flip(closed, axis=axis), axis=axis), axis=axis)
+            interior = (forward & backward) if axis == 0 else (interior & forward & backward)
+        filled = ndi.binary_fill_holes(closed | interior)
+    else:
+        # Concave-safe fill: seals enclosed interior cavities without filling concave exterior pockets
+        # (e.g. hooded faces, bangs, cape interiors, or outstretched arms).
+        filled = ndi.binary_fill_holes(closed)
     labels, _ = ndi.label(filled)
     counts = np.bincount(labels.ravel())
     counts[0] = 0
@@ -178,13 +183,14 @@ def main() -> None:
     parser.add_argument("--out-obj", type=Path, default=None, help="Optional Wavefront .obj output path.")
     parser.add_argument("--report", type=Path, default=None, help="Optional JSON report path.")
     parser.add_argument("--comfyui-dir", type=Path, default=Path(os.environ["GS_COMFYUI_DIR"]) if os.environ.get("GS_COMFYUI_DIR") else None)
-    parser.add_argument("--threshold", type=float, default=0.38, help="Density iso-threshold.")
-    parser.add_argument("--closing", type=int, default=3, help="3D binary closing iterations.")
-    parser.add_argument("--grid-res", type=int, default=380, help="Voxel grid resolution along longest axis.")
+    parser.add_argument("--threshold", type=float, default=0.30, help="Density iso-threshold.")
+    parser.add_argument("--closing", type=int, default=2, help="3D 6-connected binary closing iterations.")
+    parser.add_argument("--scanline-fill", action="store_true", help="Enable legacy 3-axis scanline interior fill (can fill concave pockets like hoods).")
+    parser.add_argument("--grid-res", type=int, default=420, help="Voxel grid resolution along longest axis.")
     parser.add_argument("--padding", type=int, default=6, help="Voxel grid border padding.")
-    parser.add_argument("--min-opacity", type=float, default=0.22, help="Drop wispy halo splats below this sigmoid opacity.")
-    parser.add_argument("--min-scale", type=float, default=0.0018, help="Minimum surfel scale to close thin gaps.")
-    parser.add_argument("--smooth-sigma", type=float, default=1.35, help="Gaussian smoothing sigma before Marching Cubes.")
+    parser.add_argument("--min-opacity", type=float, default=0.20, help="Drop wispy halo splats below this sigmoid opacity.")
+    parser.add_argument("--min-scale", type=float, default=0.0016, help="Minimum surfel scale to close thin gaps.")
+    parser.add_argument("--smooth-sigma", type=float, default=0.90, help="Gaussian smoothing sigma before Marching Cubes.")
     parser.add_argument("--coord-preset", choices=("blender", "raw_to_blender"), default="blender", help="Coordinate transform applied to output vertices.")
     args = parser.parse_args()
 
@@ -231,7 +237,7 @@ def main() -> None:
         field, origin, voxel = evaluate_density_fallback(positions, op_t, scales, rotations_wxyz, args.grid_res, args.padding, device)
 
     print(f"[gs-to-mesh] density ({backend}): shape={field.shape} voxel={voxel:.6f} max={float(field.max()):.4f}", flush=True)
-    solid, components = fill_volume(field > args.threshold, args.closing)
+    solid, components = fill_volume(field > args.threshold, args.closing, scanline_fill=args.scanline_fill)
     soft = ndi.gaussian_filter(solid.astype(np.float32), args.smooth_sigma)
     vertices, triangles, _, _ = marching_cubes(
         soft, 0.50, spacing=(voxel, voxel, voxel), allow_degenerate=False, gradient_direction="ascent"
