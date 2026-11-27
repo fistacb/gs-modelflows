@@ -303,7 +303,7 @@ class VolumetricFrame3D:
                         "ix": ix, "iy": iy,
                         "x": round(float(self.xs[ix]), 3), "y": round(float(self.ys[iy]), 3),
                         "spans": [
-                            {"z": round(sp["z"], 3), "type": sp["type"], "layer": sp["layer"], "headroom": round(sp["headroom"], 2)}
+                            {"z": round(float(sp["z"]), 3), "type": str(sp["type"]), "layer": str(sp["layer"]), "headroom": round(float(sp["headroom"]), 2)}
                             for sp in self.spans[iy][ix]
                         ],
                     })
