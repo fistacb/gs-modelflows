@@ -390,8 +390,9 @@ def main() -> None:
         sh = Image.new("RGB", (1280, 840))
         for i, im in enumerate(v_imgs):
             sh.paste(im, ((i % 2) * 640, (i // 2) * 420))
-        sh.save(args.out_dir / f"showcase_{theme['name']}_4view.png")
-        print(f"Saved 4-view showcase -> {args.out_dir / f'showcase_{theme[\"name\"]}_4view.png'}", flush=True)
+        sh_path = args.out_dir / f"showcase_{theme['name']}_4view.png"
+        sh.save(sh_path)
+        print(f"Saved 4-view showcase -> {sh_path}", flush=True)
 
         if args.export_maps:
             op_d = 1.0 / (1.0 + np.exp(-np.clip(map_d["opacity"], -20.0, 20.0)))
