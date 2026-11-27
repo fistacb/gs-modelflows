@@ -199,19 +199,38 @@ def compute_harmonic_skin_weights(
         dists[:, bi] = d
 
     # Segment outer arm cores via 3D CC + upper-arm cylinder (automatically adapts to T-pose & A-pose!)
-    # Restrict candidates to an arm-bone proximity tube so wide flare skirts near A-pose hands never merge into arm_core
+    # Restrict candidates to an arm-bone proximity tube AND front-to-back depth band around the arm bone
+    # so wide flare skirts below A-pose hands and back capes/cloaks (+Y behind the arm) NEVER merge into arm_core!
     arm_core_L = np.zeros(nb, dtype=bool)
     arm_core_R = np.zeros(nb, dtype=bool)
+    arm_y_ref = {}
     arm_cut_x = max(sh_hw + 0.045, sh_hw * 1.45)
     for side, sgn, mask_out in (("L", +1.0, arm_core_L), ("R", -1.0, arm_core_R)):
         d_arm_side = np.full(nb, 1e6, dtype=np.float32)
+        y_arm_closest = np.full(nb, float(bones[f"upper_arm_{side}"]["head"][1]), dtype=np.float32)
         for bn in (f"upper_arm_{side}", f"forearm_{side}", f"forearm_twist_{side}", f"hand_{side}"):
             if bn in bones:
-                d_arm_side = np.minimum(d_arm_side, dist_to_segment(bxyz, np.asarray(bones[bn]["head"], np.float32), np.asarray(bones[bn]["tail"], np.float32)))
+                h_b = np.asarray(bones[bn]["head"], np.float32)
+                t_b = np.asarray(bones[bn]["tail"], np.float32)
+                v_b = t_b - h_b
+                l2_b = float(np.dot(v_b, v_b))
+                proj_b = np.clip(((bxyz - h_b[None, :]) @ v_b) / max(l2_b, 1e-8), 0.0, 1.0)
+                cl_b = h_b[None, :] + proj_b[:, None] * v_b[None, :]
+                d_b = np.linalg.norm(bxyz - cl_b, axis=1).astype(np.float32)
+                better = d_b < d_arm_side
+                d_arm_side = np.where(better, d_b, d_arm_side)
+                y_arm_closest = np.where(better, cl_b[:, 1], y_arm_closest)
+        arm_y_ref[side] = y_arm_closest
+        # Exclude rear cape/cloak splats sitting clearly behind (+Y) the arm bone plane
+        not_behind_arm = (bxyz[:, 1] - y_arm_closest) <= 0.032
         hand_tip = np.asarray(bones[f"hand_{side}"]["tail"], np.float32)
         d_tip = np.linalg.norm(bxyz - hand_tip[None, :], axis=1)
-        # Tight fingertip capture (0.075) while excluding low skirt petals below the hand
-        near_arm_tube = ((d_arm_side <= 0.056) & (bxyz[:, 2] >= hip_z + 0.025)) | (d_arm_side <= 0.042) | ((d_tip <= 0.075) & (bxyz[:, 2] >= hand_tip[2] - 0.025))
+        # Tight fingertip capture (0.075) while excluding low skirt petals below the hand and rear capes
+        near_arm_tube = not_behind_arm & (
+            ((d_arm_side <= 0.052) & (bxyz[:, 2] >= hip_z + 0.025))
+            | (d_arm_side <= 0.040)
+            | ((d_tip <= 0.072) & (bxyz[:, 2] >= hand_tip[2] - 0.025))
+        )
         cand = np.where(((bxyz[:, 0] - face_cx) * sgn > arm_cut_x) & (bxyz[:, 2] >= arm_min_z) & (bxyz[:, 2] <= sh_z + 0.09) & near_arm_tube)[0]
         if len(cand) >= 20:
             cxyz = bxyz[cand]
@@ -227,7 +246,7 @@ def compute_harmonic_skin_weights(
         rel = bxyz - h_ua[None, :]
         s_ua = (rel @ u_ua) / l_ua
         perp_ua = np.linalg.norm(rel - (s_ua * l_ua)[:, None] * u_ua[None, :], axis=1)
-        ua_cyl = (s_ua >= 0.28) & (s_ua <= 1.05) & (perp_ua <= 0.072) & ((bxyz[:, 0] - face_cx) * sgn > sh_hw + 0.025)
+        ua_cyl = not_behind_arm & (s_ua >= 0.28) & (s_ua <= 1.05) & (perp_ua <= 0.048) & ((bxyz[:, 0] - face_cx) * sgn > sh_hw + 0.025)
         mask_out |= ua_cyl
 
     head_joint_z = float(bones["head"]["head"][2])
@@ -258,10 +277,21 @@ def compute_harmonic_skin_weights(
         ((np.abs(bxyz[:, 0] - face_cx) < sh_hw * 1.05) & (bxyz[:, 2] >= hip_z - 0.02) & (bxyz[:, 2] <= neck_z + 0.02))
         | ((np.abs(bxyz[:, 0] - face_cx) < sh_hw + 0.024) & (bxyz[:, 2] >= hip_z - 0.02) & (bxyz[:, 2] <= armpit_z))
     ) & ~(arm_core_L | arm_core_R | hanging_hair)
-    # Pin ALL non-arm points in the waist/flare-skirt zone so arm weights never bleed into wide skirts during heat diffusion
-    waist_core = (bxyz[:, 2] >= hip_z - 0.02) & (bxyz[:, 2] <= armpit_z - 0.045) & ~(arm_core_L | arm_core_R | hanging_hair)
+    # Pin ALL non-arm points in the waist/flare-skirt zone AND rear cape/cloak sheet behind the arms
+    # so arm weights NEVER bleed into wide skirts or back capes and tear holes during arm raises/waves!
+    arm_y_side = np.where((bxyz[:, 0] - face_cx) >= 0.0, arm_y_ref["L"], arm_y_ref["R"])
+    rear_cape_core = (
+        (bxyz[:, 2] >= hip_z - 0.16)
+        & (bxyz[:, 2] <= sh_z + 0.02)
+        & (bxyz[:, 1] > np.maximum(torso_y_c + 0.036, arm_y_side + 0.030))
+        & ~(arm_core_L | arm_core_R | hanging_hair)
+    )
+    waist_core = (
+        ((bxyz[:, 2] >= hip_z - 0.02) & (bxyz[:, 2] <= armpit_z - 0.045) & ~(arm_core_L | arm_core_R | hanging_hair))
+        | rear_cape_core
+    )
     head_core = (bxyz[:, 2] > head_joint_z + 0.004) | hanging_hair
-    leg_core = (bxyz[:, 2] < hip_z - 0.02) & ~(arm_core_L | arm_core_R)
+    leg_core = (bxyz[:, 2] < hip_z - 0.02) & ~(arm_core_L | arm_core_R | rear_cape_core)
 
     pinned = torso_core | waist_core | arm_core_L | arm_core_R | head_core | leg_core
     is_arm_b_L = np.array([b.endswith("_L") and b.startswith(("upper_arm_", "forearm_", "hand_")) for b in skin_bones])
