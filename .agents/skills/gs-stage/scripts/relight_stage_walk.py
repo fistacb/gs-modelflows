@@ -63,6 +63,10 @@ def main() -> None:
     ap.add_argument("--firefly-color", default="1.0,0.86,0.42", help="RGB color for firefly micro-lights (comma-separated 0..1).")
     ap.add_argument("--firefly-strength", type=float, default=0.85, help="3D surface illumination strength per firefly.")
     ap.add_argument("--firefly-radius", type=float, default=1.45, help="3D lighting falloff radius (m) per firefly.")
+    ap.add_argument("--sun-shadow", action="store_true", help="Cast real 3D directional sun shadows (static stage + moving character) from sky light.")
+    ap.add_argument("--sun-dir", default="-0.52,-0.45,0.72", help="Directional sun vector (x,y,z pointing toward sky sun).")
+    ap.add_argument("--sun-shadow-strength", type=float, default=0.52, help="Shadow darkening strength (0..1).")
+    ap.add_argument("--sun-shadow-tint", default="0.54,0.58,0.74", help="Cool sky-lit shadow tint RGB (0..1).")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--duration-ms", type=int, default=90)
     args = ap.parse_args()
@@ -181,7 +185,47 @@ def main() -> None:
                 "pphase": float(rng.uniform(0, 2 * math.pi)),
             })
 
-    # 4. Real-time 3D relighting + slab occlusion + character self-shadow + fireflies + emissive bloom
+    # 3c. Optional 3D Directional Sun Shadow Map (static stage cast shadows from sky light)
+    sun_dir = np.array([float(v) for v in args.sun_dir.split(",")], dtype=np.float32)
+    sun_dir /= max(float(np.linalg.norm(sun_dir)), 1e-6)
+    shadow_tint = np.array([float(v) for v in args.sun_shadow_tint.split(",")], dtype=np.float32)
+    static_sun_shadow = np.zeros((H, W), dtype=np.float32)
+    sun_ndotl = np.ones((H, W), dtype=np.float32)
+
+    if args.sun_shadow:
+        up_ref = np.array([0.0, 0.0, 1.0], dtype=np.float32) if abs(sun_dir[2]) < 0.95 else np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        u_sun = np.cross(up_ref, sun_dir); u_sun /= np.linalg.norm(u_sun)
+        v_sun = np.cross(sun_dir, u_sun); v_sun /= np.linalg.norm(v_sun)
+
+        su_b = xyz_b @ u_sun
+        sv_b = xyz_b @ v_sun
+        sz_b = xyz_b @ sun_dir
+        res_s = 0.045
+        u_min, u_max = float(su_b.min()) - 0.3, float(su_b.max()) + 0.3
+        v_min, v_max = float(sv_b.min()) - 0.3, float(sv_b.max()) + 0.3
+        nu = int(math.ceil((u_max - u_min) / res_s)) + 2
+        nv = int(math.ceil((v_max - v_min) / res_s)) + 2
+        smap = np.full((nv, nu), -1e6, dtype=np.float32)
+        iu_b = np.clip(((su_b - u_min) / res_s).astype(np.int32), 0, nu - 1)
+        iv_b = np.clip(((sv_b - v_min) / res_s).astype(np.int32), 0, nv - 1)
+        np.maximum.at(smap, (iv_b, iu_b), sz_b)
+        # 1-texel morphological max-dilate closes tiny gaps between splats
+        smap = cv2.dilate(smap, np.ones((3, 3), np.uint8))
+
+        su_px = xyz_s[:, :, 0] * u_sun[0] + xyz_s[:, :, 1] * u_sun[1] + xyz_s[:, :, 2] * u_sun[2]
+        sv_px = xyz_s[:, :, 0] * v_sun[0] + xyz_s[:, :, 1] * v_sun[1] + xyz_s[:, :, 2] * v_sun[2]
+        sz_px = xyz_s[:, :, 0] * sun_dir[0] + xyz_s[:, :, 1] * sun_dir[1] + xyz_s[:, :, 2] * sun_dir[2]
+        iu_px = np.clip(((su_px - u_min) / res_s).astype(np.int32), 0, nu - 1)
+        iv_px = np.clip(((sv_px - v_min) / res_s).astype(np.int32), 0, nv - 1)
+        z_occ = smap[iv_px, iu_px]
+        # Soft cast shadow where a higher solid occluder blocks the sun ray
+        raw_sh = np.clip((z_occ - sz_px - 0.24) / 0.22, 0.0, 1.0) * fg_f
+        # Also softly shade surfaces facing away from the sun
+        sun_ndotl = np.clip(np.sum(nrm * sun_dir[None, None, :], axis=-1), 0.0, 1.0)
+        nrm_sh = np.clip((0.18 - sun_ndotl) / 0.25, 0.0, 1.0) * 0.45 * fg_f
+        static_sun_shadow = np.maximum(cv2.GaussianBlur(raw_sh, (0, 0), 2.2), cv2.GaussianBlur(nrm_sh, (0, 0), 1.5)) * fg_f
+
+    # 4. Real-time 3D relighting + slab occlusion + character self-shadow + fireflies + sun shadow + emissive bloom
     out_frs = []
     lan_col = np.array([1.35, 0.86, 0.34], dtype=np.float32)
     px_z = xyz_s[:, :, 2]
@@ -217,10 +261,13 @@ def main() -> None:
             atten = (args.lantern_strength * pulse) * np.exp(-(d3 / 2.25) ** 2) / (0.42 + d3 * d3 * 0.85) * slab_vis
             relight_add += base_im * lan_col[None, None, :] * (wrap * atten * stage_only_f)[:, :, None] * 1.15
 
-        for sp_w, sc_rgb, _, sf, sph in static_lights:
-            flk = 0.14 * math.sin(fi * sf + sph)
-            d_s = np.linalg.norm(sp_w[None, None, :] - xyz_s, axis=-1)
-            relight_add += base_im * sc_rgb[None, None, :] * (np.exp(-(d_s / 1.55) ** 2) * flk * stage_only_f)[:, :, None]
+        is_day_sun = args.sun_shadow and args.lantern_strength <= 1e-4
+
+        if not is_day_sun:
+            for sp_w, sc_rgb, _, sf, sph in static_lights:
+                flk = 0.14 * math.sin(fi * sf + sph)
+                d_s = np.linalg.norm(sp_w[None, None, :] - xyz_s, axis=-1)
+                relight_add += base_im * sc_rgb[None, None, :] * (np.exp(-(d_s / 1.55) ** 2) * flk * stage_only_f)[:, :, None]
 
         # Dynamic 3D firefly micro-lights (real localized 3D surface illumination + slab occlusion)
         theta = 2.0 * math.pi * (fi / max(n_frs, 1))
@@ -246,9 +293,47 @@ def main() -> None:
                 f_att = (args.firefly_strength * glow) * np.exp(-(df / args.firefly_radius) ** 2) / (0.35 + df * df * 1.2) * f_slab
                 relight_add += base_im * firefly_col[None, None, :] * (ndf * f_att * stage_only_f)[:, :, None]
 
-        # Character back-facing self-shadow
-        char_shaded = base_im
-        if args.lantern_strength > 1e-4 and back_factor > 0.05:
+        # Character shading & optional 3D Directional Sun Shadows (static stage + dynamic character cast shadow)
+        char_shaded = base_im.copy()
+        if args.sun_shadow:
+            cx, cy, cz = float(t["x"]), float(t["y"]), float(t["z"])
+            sc_h = args.char_height_m / 1.40
+            # Dynamic character silhouette cast shadow along -sun_dir
+            char_cast = np.zeros((H, W), dtype=np.float32)
+            if cz < args.slab_z - 0.15:
+                c_slab = np.clip((args.slab_z - px_z) / 0.22, 0.0, 1.0)
+            else:
+                c_slab = np.clip((px_z - (args.slab_z - 0.55)) / 0.45, 0.15, 1.0)
+            for hk, rk in ((0.28 * sc_h, 0.27), (0.68 * sc_h, 0.26), (1.08 * sc_h, 0.22)):
+                sp_c = np.array([cx, cy, cz + hk], dtype=np.float32)
+                dv = sp_c[None, None, :] - xyz_s
+                t_ray = dv[:, :, 0] * sun_dir[0] + dv[:, :, 1] * sun_dir[1] + dv[:, :, 2] * sun_dir[2]
+                perp = dv - t_ray[:, :, None] * sun_dir[None, None, :]
+                d_perp = np.linalg.norm(perp, axis=-1)
+                hit = np.clip(1.0 - (d_perp / rk) ** 2, 0.0, 1.0) * np.clip((t_ray - 0.02) / 0.18, 0.0, 1.0) * np.clip((2.8 - t_ray) / 0.8, 0.0, 1.0)
+                char_cast = np.maximum(char_cast, hit)
+            # Soft contact AO shadow directly under feet
+            d_ft = np.hypot(xyz_s[:, :, 0] - cx, xyz_s[:, :, 1] - cy)
+            dz_ft = np.abs(px_z - cz)
+            contact_ao = np.exp(-(d_ft / 0.28) ** 2) * np.exp(-(dz_ft / 0.14) ** 2) * 0.72
+            char_cast = np.maximum(char_cast * c_slab, contact_ao) * stage_only_f
+
+            total_sh = np.maximum(static_sun_shadow * stage_only_f, char_cast)
+            sh_w = np.clip(total_sh * args.sun_shadow_strength, 0.0, 0.85)[:, :, None]
+            # Cool sky-lit shadow tint on shaded stage pixels + subtle warm sunlit pop on unshaded sun-facing surfaces
+            stage_sun = base_im * (1.0 - sh_w) + (base_im * shadow_tint[None, None, :]) * sh_w
+            sun_pop = np.clip(sun_ndotl - 0.35, 0.0, 1.0) * (1.0 - total_sh) * stage_only_f
+            stage_sun = np.clip(stage_sun + base_im * np.array([0.08, 0.06, 0.02], np.float32)[None, None, :] * sun_pop[:, :, None], 0.0, 1.0)
+
+            # Also shade the character when she walks into a static stage shadow (e.g. under the skybridge!)
+            char_mid = np.array([cx, cy, cz + 0.70 * sc_h], dtype=np.float32)
+            c_iu = int(np.clip((float(np.dot(char_mid, u_sun)) - u_min) / res_s, 0, nu - 1))
+            c_iv = int(np.clip((float(np.dot(char_mid, v_sun)) - v_min) / res_s, 0, nv - 1))
+            c_sz = float(np.dot(char_mid, sun_dir))
+            c_in_sh = float(np.clip((smap[c_iv, c_iu] - c_sz - 0.24) / 0.35, 0.0, 1.0)) * args.sun_shadow_strength * 0.85
+            char_lit = base_im * (1.0 - c_in_sh) + (base_im * shadow_tint[None, None, :]) * c_in_sh
+            char_shaded = np.where(is_char[:, :, None], char_lit, stage_sun)
+        elif args.lantern_strength > 1e-4 and back_factor > 0.05:
             cool_back = np.array([0.52, 0.62, 0.84], dtype=np.float32)
             char_shaded = np.where(
                 is_char[:, :, None],
@@ -257,19 +342,23 @@ def main() -> None:
             )
 
         lit = np.clip(char_shaded + relight_add, 0.0, 1.0)
-        em_allow = (~(is_char & (back_factor > 0.15))).astype(np.float32)
-        em_mask = np.maximum(lit - 0.64, 0.0) * 1.40 * em_allow[:, :, None]
-        em_bloom = cv2.GaussianBlur(em_mask, (0, 0), 5.5) * 0.55 + cv2.GaussianBlur(em_mask, (0, 0), 14.0) * 0.35
+        if is_day_sun:
+            em_bloom = np.zeros_like(lit)
+        else:
+            em_allow = (~(is_char & (back_factor > 0.15))).astype(np.float32)
+            em_mask = np.maximum(lit - 0.64, 0.0) * 1.40 * em_allow[:, :, None]
+            em_bloom = cv2.GaussianBlur(em_mask, (0, 0), 5.5) * 0.55 + cv2.GaussianBlur(em_mask, (0, 0), 14.0) * 0.35
 
         halo = np.zeros_like(lit)
-        for sp_w, sc_rgb, sg, sf, sph in static_lights:
-            u_s, v_s = proj_2d(sp_w)
-            rs = np.hypot(xx - u_s, yy - v_s)
-            flk_m = 1.0 + 0.10 * math.sin(fi * sf + sph)
-            halo += (
-                np.exp(-(rs / 12.0) ** 2)[:, :, None] * sc_rgb[None, None, :] * (sg * 0.72 * flk_m)
-                + np.exp(-(rs / 46.0) ** 2)[:, :, None] * sc_rgb[None, None, :] * (sg * 0.30 * flk_m)
-            )
+        if not is_day_sun:
+            for sp_w, sc_rgb, sg, sf, sph in static_lights:
+                u_s, v_s = proj_2d(sp_w)
+                rs = np.hypot(xx - u_s, yy - v_s)
+                flk_m = 1.0 + 0.10 * math.sin(fi * sf + sph)
+                halo += (
+                    np.exp(-(rs / 12.0) ** 2)[:, :, None] * sc_rgb[None, None, :] * (sg * 0.72 * flk_m)
+                    + np.exp(-(rs / 46.0) ** 2)[:, :, None] * sc_rgb[None, None, :] * (sg * 0.30 * flk_m)
+                )
 
         if args.lantern_strength > 1e-4:
             u_l, v_l = proj_2d(lw)
