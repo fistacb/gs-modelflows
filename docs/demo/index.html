@@ -938,10 +938,11 @@
         const mag = Math.hypot(sx, sy);
         if (mag > 0.08) {
           sx /= Math.max(mag, 1.0); sy /= Math.max(mag, 1.0);
-          // Rotate screen input into Blender XY using camera azimuth (-20 deg)
-          const az = meta.cam.front * Math.PI / 180;
-          const rightX = Math.cos(az), rightY = Math.sin(az);
-          const fwdX = -Math.sin(az), fwdY = Math.cos(az);
+          // Use exact camera horizontal basis in Blender XY (tw = [x, z, -y])
+          const rLen = Math.hypot(camRight[0], -camRight[2]);
+          const fLen = Math.hypot(camFwd[0], -camFwd[2]);
+          const rightX = camRight[0] / rLen, rightY = -camRight[2] / rLen;
+          const fwdX = camFwd[0] / fLen, fwdY = -camFwd[2] / fLen;
           const vx = (sx * rightX - sy * fwdX) * 2.15;
           const vy = (sx * rightY - sy * fwdY) * 2.15;
           const nx = state.charPos[0] + vx * dt;
@@ -1001,9 +1002,14 @@
       gl.uniform1f(U.u_time, tSec);
 
       const yr = state.charYaw * Math.PI / 180;
+      const fxW = Math.sin(yr), fyW = -Math.cos(yr);
       gl.uniform3fv(U.u_charPos, state.charPos);
-      gl.uniform2f(U.u_charFwd, Math.sin(yr), -Math.cos(yr));
-      const dirIdx = Math.round(((state.charYaw + meta.cam.front + 360) % 360) / 45) % 8;
+      gl.uniform2f(U.u_charFwd, fxW, fyW);
+      // Project forward vector to screen space so sprite row matches visual movement 100%
+      const p0s = jsProj2d(state.charPos);
+      const p1s = jsProj2d([state.charPos[0] + fxW * 0.5, state.charPos[1] + fyW * 0.5, state.charPos[2]]);
+      const scrAng = (Math.atan2(-(p1s[0] - p0s[0]), (p1s[1] - p0s[1])) * 180 / Math.PI + 360) % 360;
+      const dirIdx = Math.round(scrAng / 45) % 8;
       gl.uniform2f(U.u_charTile, Math.floor(state.walkPhase) % 8, dirIdx);
       gl.uniform1f(U.u_charHeight, 1.40);
       gl.uniform1f(U.u_lanternOn, state.lantern ? 1.0 : 0.0);
