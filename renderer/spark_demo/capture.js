@@ -41,6 +41,7 @@ function setupCameraAndRenderTarget(options, yaw) {
   renderer.setClearColor(background);
   root.rotation.x = Math.PI;
   root.position.set(-target[0], target[1], target[2]);
+  root.updateMatrixWorld(true);
   camera.fov = fov;
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
