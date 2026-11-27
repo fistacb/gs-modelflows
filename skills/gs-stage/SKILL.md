@@ -73,13 +73,32 @@ python skills/gs-stage/scripts/assemble_stage.py \
 ### 3. リグ済み 3DGS キャラクターの立体ウォークスルー動画（`render_stage_walk.py`）
 ```bash
 python skills/gs-stage/scripts/render_stage_walk.py \
-  --map-ply work/stage_ruins/map_forest_ruins.ply \
+  --map-ply work/stage_ruins/map_forest_night.ply \
   --trajectory work/stage_ruins/walk_3d_trajectory.json \
   --char-v1 work/hood-01/05_rig/v1 \
+  --hand-prop work/cage-01/v1_prop/prop.ply \
+  --look-around \
   --out-dir work/stage_ruins \
   --spark-dir <spark_demo>
 ```
-- 統合マップを Spark の `static` レイヤーとして 1 回だけ GPU に載せ、キャラのみ毎フレーム差し替えるため、64 フレームの立体交差ウォークスルーを約 25〜40 秒で生成できる。
+- `--hand-prop`: 手持ちプロップ（ランタンケージ等）を右手へ自動アタッチ。
+- `--look-around`: 歩行中に周囲をキョロキョロ見回す首・頭・胸のモーションを追加。
+- 統合マップを Spark の `static` レイヤーとして 1 回だけ GPU に載せ、キャラのみ毎フレーム差し替えるため、56〜64 フレームの立体交差ウォークスルーを約 25〜40 秒で生成できる。
+
+### 4. 位置＋法線マップ駆動のリアルタイム 3D リライティング ＆ 光源発光（`relight_stage_walk.py`）
+夜シーンやダンジョン等では、静止ステージの 3D 位置マップを 1 枚だけ追加レンダリングし、全フレームへリアルタイム 3D リライティング＆光源ブルームを適用できる（約 15 秒）：
+```bash
+python skills/gs-stage/scripts/relight_stage_walk.py \
+  --map-ply work/stage_ruins/map_forest_night.ply \
+  --frames-dir <spark_demo>/walk_stage_ruins_out \
+  --frame-json work/stage_ruins/frame_ruins_3d.json \
+  --trajectory work/stage_ruins/walk_3d_trajectory.json \
+  --out-gif work/stage_ruins/stage_walk_night_relit.gif \
+  --spark-dir <spark_demo>
+```
+- **多層スラブ遮蔽（`--slab-z`）**: 1 階（高架下）と 2 階（石橋）の間にある石スラブで垂直方向の光抜けを遮断し、ハローもカメラ Z 深度比較で遮蔽する。
+- **キャラ背面セルフシャドウ**: 静止背景差分マスクでキャラ領域を分離し、後ろ姿のときはマント背面への光貫通を防ぐ。
+- **固定光源の発光＆ゆらぎ**: `frame.json` の `lights`（街灯・石門ランタン・青クリスタル・光るキノコ等）に自動でブルームと微細なゆらぎを付与。
 
 ---
 

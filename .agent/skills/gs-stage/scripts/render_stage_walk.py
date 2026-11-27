@@ -57,6 +57,8 @@ def main() -> None:
     ap.add_argument("--cam-pitch", type=float, default=19.0)
     ap.add_argument("--cam-dist", type=float, default=12.2)
     ap.add_argument("--duration-ms", type=int, default=90)
+    ap.add_argument("--look-around", action="store_true", help="Add curious head/neck/chest look-around motion while walking.")
+    ap.add_argument("--hand-prop", type=Path, default=None, help="Optional handheld v1_prop/prop.ply (e.g. lantern cage) attached to hand_R.")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -83,9 +85,24 @@ def main() -> None:
     map_rel = f"frames/{tag}/map_static.ply"
     write_ply(args.spark_dir / map_rel, blender_to_spark_data(map_d))
 
+    cage_xyz0 = None
+    cage_base = None
+    if args.hand_prop and args.hand_prop.exists():
+        cage_raw, _ = read_ply(args.hand_prop)
+        c_h = max(float(np.ptp(cage_raw["z"])), 1e-4)
+        c_sc = 0.215 / c_h
+        cage_xyz0 = np.column_stack([cage_raw["x"], cage_raw["y"], cage_raw["z"]]).astype(np.float32) * c_sc
+        cage_base = np.zeros(len(cage_raw), dtype=hb.dtype)
+        for k in hb.dtype.names:
+            if k in cage_raw.dtype.names:
+                cage_base[k] = cage_raw[k]
+        for si in range(3):
+            cage_base[f"scale_{si}"] = cage_raw[f"scale_{si}"] + math.log(c_sc)
+
     ls_char = math.log(args.char_height_m)
     seq = []
     for fi, t in enumerate(traj):
+        u_t = fi / max(len(traj) - 1, 1)
         ph = float(t["gait_phase"])
         sw = math.sin(ph) * float(t["stride_mul"])
         lift_L = max(0.0, math.cos(ph)) * float(t["knee_lift_mul"])
@@ -93,14 +110,19 @@ def main() -> None:
         tpitch = float(t["torso_pitch_deg"])
         bob = 0.018 * abs(math.sin(ph))
 
+        look_yaw = (28.0 * math.sin(u_t * 4.5 * math.pi + 0.4)) if args.look_around else 0.0
+        look_pitch = (7.0 * math.sin(u_t * 3.0 * math.pi - 0.5) + 3.0) if args.look_around else 0.0
+        has_prop = cage_base is not None
+
         pose = {
-            "spine_lower": euler_xyz(tpitch * 0.55, 0.0, 2.5 * math.sin(ph)),
-            "chest": euler_xyz(tpitch * 0.45, 0.0, -3.5 * math.sin(ph)),
-            "neck": euler_xyz(-tpitch * 0.4, 0.0, 0.0),
-            "head": euler_xyz(-tpitch * 0.3, 0.0, 4.0 * math.sin(fi * 0.14)),
-            "clavicle_R": euler_xyz(0.0, 4.0, 4.0),
-            "upper_arm_R": euler_xyz(16.0 * sw, 54.0, 8.0),
-            "forearm_R": euler_xyz(10.0 + 6.0 * max(0.0, sw), 10.0, 6.0),
+            "spine_lower": euler_xyz(tpitch * 0.55, 0.0, 2.5 * math.sin(ph) + look_yaw * 0.10),
+            "chest": euler_xyz(tpitch * 0.45, 0.0, -3.5 * math.sin(ph) + look_yaw * 0.16),
+            "neck": euler_xyz(-tpitch * 0.4 + look_pitch * 0.35, 0.0, look_yaw * 0.32),
+            "head": euler_xyz(-tpitch * 0.3 + look_pitch * 0.65, 2.0 * math.sin(u_t * 4.5 * math.pi) if args.look_around else 0.0, look_yaw * 0.68 if args.look_around else 4.0 * math.sin(fi * 0.14)),
+            "clavicle_R": euler_xyz(0.0, 6.0 if has_prop else 4.0, 10.0 if has_prop else 4.0),
+            "upper_arm_R": euler_xyz(14.0 - 2.0 * math.sin(ph), 24.0, 74.0) if has_prop else euler_xyz(16.0 * sw, 54.0, 8.0),
+            "forearm_R": euler_xyz(10.0, 12.0, 16.0) if has_prop else euler_xyz(10.0 + 6.0 * max(0.0, sw), 10.0, 6.0),
+            "hand_R": euler_xyz(-6.0, -8.0, -4.0) if has_prop else euler_xyz(0.0, 0.0, 0.0),
             "clavicle_L": euler_xyz(0.0, 4.0, -4.0),
             "upper_arm_L": euler_xyz(-16.0 * sw, 54.0, -8.0),
             "forearm_L": euler_xyz(10.0 + 6.0 * max(0.0, -sw), 10.0, -6.0),
@@ -116,17 +138,33 @@ def main() -> None:
         z_floor = float(np.percentile(xyz_p[op_b > 0.3, 2], 0.5))
         xyz_p[:, 2] -= (z_floor - bob)
 
+        ch_parts = []
+        body_f = hb.copy()
+        body_f["x"], body_f["y"], body_f["z"] = xyz_p[:, 0], xyz_p[:, 1], xyz_p[:, 2]
+        body_f["rot_0"], body_f["rot_1"], body_f["rot_2"], body_f["rot_3"] = rot_p[:, 0], rot_p[:, 1], rot_p[:, 2], rot_p[:, 3]
+        ch_parts.append(body_f)
+
+        if has_prop:
+            R_h, _, t_h = fk["hand_R"]
+            t_h = t_h.copy(); t_h[2] -= (z_floor - bob)
+            hand_tip = (np.array(bones["hand_R"]["tail"], dtype=np.float32) @ R_h.T) + t_h
+            piv_loc = np.array([0.0, 0.0, 0.215 * 0.90], dtype=np.float32)
+            cf = cage_base.copy()
+            c_xyz_l = (cage_xyz0 - piv_loc[None, :]) + hand_tip[None, :]
+            cf["x"], cf["y"], cf["z"] = c_xyz_l[:, 0], c_xyz_l[:, 1], c_xyz_l[:, 2]
+            ch_parts.append(cf)
+
+        ch = np.concatenate(ch_parts, axis=0) if len(ch_parts) > 1 else ch_parts[0]
         yaw_rad = math.radians(float(t["yaw_deg"]))
         R_w = Rotation.from_euler("z", yaw_rad).as_matrix().astype(np.float32)
         q_xyzw = Rotation.from_euler("z", yaw_rad).as_quat()
         q_w = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
         w_pos = np.array([float(t["x"]), float(t["y"]), float(t["z"])], dtype=np.float32)
 
-        c_pos = (xyz_p * args.char_height_m) @ R_w.T + w_pos[None, :]
-        c_rot = quat_mul_wxyz(q_w, rot_p)
+        c_pos = (np.column_stack([ch["x"], ch["y"], ch["z"]]).astype(np.float32) * args.char_height_m) @ R_w.T + w_pos[None, :]
+        c_rot = quat_mul_wxyz(q_w, np.column_stack([ch["rot_0"], ch["rot_1"], ch["rot_2"], ch["rot_3"]]).astype(np.float32))
         c_rot /= np.maximum(np.linalg.norm(c_rot, axis=1, keepdims=True), 1e-8)
 
-        ch = hb.copy()
         ch["x"], ch["y"], ch["z"] = c_pos[:, 0], c_pos[:, 1], c_pos[:, 2]
         ch["rot_0"], ch["rot_1"], ch["rot_2"], ch["rot_3"] = c_rot[:, 0], c_rot[:, 1], c_rot[:, 2], c_rot[:, 3]
         for si in range(3):
