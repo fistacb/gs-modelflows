@@ -74,6 +74,8 @@ Given a single multi-object prop sheet (black, white, or transparent background)
 ### 3D Volumetric Map Frame × Theme Swap × Real-Time 3D Lighting (`gs-stage`)
 Separating **Frame** (multi-layer 3D walkable spans, stairs, overpasses, prop anchors, lights), **Theme** (image-compiled palettes, swappable `irregular_ruin` / `crisp_brick` / `ashlar_cut` masonry, `moss_amount`, `floor_wall_contrast`), and **standalone Splat objects** (`v1_prop/` + rigged `v1/`), `gs-stage` compiles true multi-layer 3D navigation (`(ix, iy, span_idx)` with step-height & headroom limits) and applies real-time Position+Normal **3D Directional Sun Shadow Maps** (morning vs golden-hour sunset elevation, dynamic character cast shadow, bridge underpass darkening) and **Night Relighting** (slab-occluded handheld lantern + drifting 3D firefly micro-lights with depth occlusion):
 
+> **[▶ Launch Live Interactive WebGL2 Demo (PC & Mobile)](https://fistacb.github.io/gs-modelflows/demo/)** — Walk `hood-01` across the 2-story 3D stage (`WASD` / Tap / Touch Joystick), press `T` to swap **Forest ↔ Desert** live, and drag the **Time of Day** slider to sweep real-time 3D sun shadows and night fireflies!
+
 <p align="center">
   <img src="docs/assets/showcase/14_stage_3d_crossing_walk.gif" width="760" alt="2x2 same-frame 3DGS walkthrough: Forest Morning Sun & Night Fireflies vs Desert Evening Sunset & Night Fireflies" />
 </p>

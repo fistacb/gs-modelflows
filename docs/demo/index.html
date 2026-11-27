@@ -1,0 +1,1057 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>gs-stage | Real-Time 2.5D GBuffer Lighting & Multi-Layer 3D Demo</title>
+<style>
+  :root {
+    --bg: #0c1018;
+    --panel: rgba(18, 24, 36, 0.86);
+    --border: rgba(255, 255, 255, 0.12);
+    --accent: #f3b562;
+    --accent2: #7fd48a;
+    --text: #eef2f8;
+    --muted: #98a4b8;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    overflow-x: hidden;
+  }
+  .app {
+    display: flex; flex-direction: column; align-items: center;
+    width: 100%; max-width: 100vw; overflow-x: hidden;
+    min-height: 100dvh; padding: 10px 10px calc(14px + env(safe-area-inset-bottom));
+    gap: 10px;
+  }
+  .topbar {
+    width: 100%; max-width: 960px; min-width: 0;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap;
+  }
+  .title-wrap { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .title { font-size: 16px; font-weight: 700; letter-spacing: 0.02em; }
+  .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: rgba(243, 181, 98, 0.16); color: var(--accent);
+    border: 1px solid rgba(243, 181, 98, 0.35);
+  }
+  .hud-stats {
+    font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
+    display: flex; gap: 10px; align-items: center;
+  }
+  .hud-stats a { color: #8ab4f8; text-decoration: none; }
+  .hud-stats a:hover { text-decoration: underline; }
+
+  .stage-wrap {
+    position: relative; width: 100%; max-width: 960px;
+    aspect-ratio: 800 / 525;
+    border-radius: 14px; overflow: hidden;
+    border: 1px solid var(--border);
+    box-shadow: 0 18px 48px rgba(0,0,0,0.55);
+    background: #0a0e16;
+    touch-action: none;
+    user-select: none;
+  }
+  canvas {
+    width: 100%; height: 100%; display: block;
+    touch-action: none;
+  }
+  .loading-overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(10, 14, 22, 0.92);
+    gap: 10px; font-size: 14px; color: var(--muted);
+    transition: opacity 0.35s ease;
+    z-index: 20;
+  }
+  .loading-overlay.hidden { opacity: 0; pointer-events: none; }
+  .spinner {
+    width: 28px; height: 28px; border-radius: 50%;
+    border: 3px solid rgba(255,255,255,0.14);
+    border-top-color: var(--accent);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Floating Joystick for touch / manual walk */
+  .joystick {
+    position: absolute; left: 16px; bottom: 16px;
+    width: 108px; height: 108px; border-radius: 50%;
+    background: rgba(15, 22, 34, 0.45);
+    border: 2px solid rgba(255,255,255,0.22);
+    backdrop-filter: blur(6px);
+    display: flex; align-items: center; justify-content: center;
+    touch-action: none; z-index: 10;
+    transition: opacity 0.2s;
+  }
+  .joystick.dim { opacity: 0.42; }
+  .joy-knob {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: rgba(243, 181, 98, 0.85);
+    box-shadow: 0 2px 12px rgba(0,0,0,0.45);
+    transform: translate(0px, 0px);
+    pointer-events: none;
+  }
+  .hint-pill {
+    position: absolute; right: 12px; bottom: 12px;
+    font-size: 11px; color: rgba(255,255,255,0.82);
+    background: rgba(10, 14, 22, 0.58);
+    border: 1px solid rgba(255,255,255,0.14);
+    backdrop-filter: blur(6px);
+    padding: 5px 10px; border-radius: 999px;
+    pointer-events: none; z-index: 9;
+  }
+
+  .controls {
+    width: 100%; max-width: 960px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 10px;
+    backdrop-filter: blur(10px);
+  }
+  .row {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  }
+  .btn {
+    appearance: none; border: 1px solid var(--border);
+    background: rgba(255,255,255,0.06); color: var(--text);
+    border-radius: 10px; padding: 8px 12px;
+    min-height: 40px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: background 0.15s, border-color 0.15s, transform 0.08s;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn.active {
+    background: rgba(243, 181, 98, 0.22);
+    border-color: rgba(243, 181, 98, 0.65);
+    color: #ffe2b3;
+  }
+  .btn.forest.active {
+    background: rgba(127, 212, 138, 0.22);
+    border-color: rgba(127, 212, 138, 0.65);
+    color: #d6ffd9;
+  }
+  .kbd {
+    font-size: 10px; padding: 1px 5px; border-radius: 4px;
+    background: rgba(255,255,255,0.12); color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .slider-wrap {
+    flex: 1 1 200px; min-width: 0; max-width: 100%;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .slider-label {
+    font-size: 13px; font-weight: 600; white-space: nowrap;
+    min-width: 96px; font-variant-numeric: tabular-nums;
+  }
+  input[type="range"] {
+    flex: 1; min-width: 0; height: 28px; accent-color: var(--accent); cursor: pointer;
+  }
+  .spacer { flex: 1; }
+  @media (max-width: 640px) {
+    .kbd { display: none; }
+    .title { font-size: 14px; }
+    .btn { padding: 7px 10px; font-size: 12px; min-height: 38px; }
+    .joystick { width: 96px; height: 96px; left: 10px; bottom: 10px; }
+    .joy-knob { width: 38px; height: 38px; }
+    .hint-pill { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="title-wrap">
+      <div class="title">gs-stage 2.5D GBuffer Lighting Demo</div>
+      <span class="badge" id="themeBadge">Forest Ruins</span>
+    </div>
+    <div class="hud-stats">
+      <span id="posStat">Layer 0 · z=0.00m</span>
+      <span id="fpsStat">60 fps</span>
+      <a href="https://github.com/fistacb/gs-modelflows" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </div>
+
+  <div class="stage-wrap" id="stageWrap">
+    <canvas id="glCanvas" width="800" height="525"></canvas>
+    <div class="joystick dim" id="joystick" title="Drag to walk">
+      <div class="joy-knob" id="joyKnob"></div>
+    </div>
+    <div class="hint-pill">WASD / Tap / Stick to Walk · T: Theme · 1-4: Time</div>
+    <div class="loading-overlay" id="loading">
+      <div class="spinner"></div>
+      <div id="loadingText">Loading 3DGS GBuffer &amp; Multi-Layer NavMesh...</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="row">
+      <button class="btn forest active" id="btnTheme">🌲 Forest / 🏜️ Desert <span class="kbd">T</span></button>
+      <button class="btn active" id="btnAutoWalk">🚶 Auto Walk <span class="kbd">Space</span></button>
+      <button class="btn active" id="btnFireflies">✨ Fireflies <span class="kbd">F</span></button>
+      <button class="btn active" id="btnLantern">🏮 Lantern <span class="kbd">L</span></button>
+      <button class="btn" id="btnCycle">⏱️ Auto Time <span class="kbd">C</span></button>
+    </div>
+    <div class="row">
+      <button class="btn" id="btnMorning">🌅 Morning <span class="kbd">1</span></button>
+      <button class="btn" id="btnNoon">☀️ Noon <span class="kbd">2</span></button>
+      <button class="btn" id="btnSunset">🌇 Sunset <span class="kbd">3</span></button>
+      <button class="btn" id="btnNight">🌙 Night <span class="kbd">4</span></button>
+      <div class="slider-wrap">
+        <span class="slider-label" id="timeLabel">08:00 Morning</span>
+        <input type="range" id="timeSlider" min="0" max="24" step="0.05" value="8.0" />
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('glCanvas');
+  const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
+  if (!gl) {
+    document.getElementById('loadingText').textContent = 'WebGL2 is not supported on this browser.';
+    return;
+  }
+
+  // ---- Shaders ----
+  const VS = `#version 300 es
+  in vec2 a_pos;
+  out vec2 v_uv;
+  void main() {
+    v_uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5);
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+  }`;
+
+  const FS = `#version 300 es
+  precision highp float;
+
+  in vec2 v_uv;
+  out vec4 outColor;
+
+  uniform sampler2D u_albedo;
+  uniform sampler2D u_pos;
+  uniform sampler2D u_nrm;
+  uniform sampler2D u_occ;
+  uniform sampler2D u_charAlbedo;
+  uniform sampler2D u_charNormal;
+
+  uniform vec2 u_res;
+  uniform vec3 u_lo;
+  uniform vec3 u_hi;
+  uniform float u_zMaxEnc;
+  uniform float u_slabZ;
+
+  // Camera
+  uniform vec3 u_camTw;
+  uniform vec3 u_camB;
+  uniform vec3 u_camTarget;
+  uniform vec3 u_camFwd;
+  uniform vec3 u_camRight;
+  uniform vec3 u_camUp;
+  uniform float u_fx;
+
+  // Time / Sky / Sun
+  uniform vec3 u_skyTop;
+  uniform vec3 u_skyBot;
+  uniform float u_nightFactor;
+  uniform vec3 u_ambient;
+  uniform vec3 u_sunDir;
+  uniform float u_sunStrength;
+  uniform vec3 u_shadowTint;
+  uniform vec3 u_sunWarm;
+  uniform float u_time;
+
+  // Character
+  uniform vec3 u_charPos;      // Blender world (x, y, z)
+  uniform vec2 u_charFwd;      // XY forward
+  uniform vec2 u_charTile;     // (frameIdx, dirIdx)
+  uniform float u_charHeight;
+  uniform float u_lanternOn;
+
+  // Static fixture lights (max 4): pos.xyz, radius
+  uniform int u_numStatic;
+  uniform vec4 u_staticPos[4];
+  uniform vec3 u_staticCol[4];
+
+  // 14 Drifting 3D Fireflies: pos.xyz, glow
+  uniform float u_fireflyOn;
+  uniform vec3 u_fireflyCol;
+  uniform vec4 u_fireflies[14];
+
+  vec3 proj2d(vec3 pb) {
+    vec3 tw = vec3(pb.x - u_camTarget.x, pb.z - (-u_camTarget.y), -(pb.y - u_camTarget.z));
+    vec3 rel = tw - u_camTw;
+    float d = dot(rel, u_camFwd);
+    float u = dot(rel, u_camRight) / d * u_fx + (u_res.x - 1.0) * 0.5;
+    float v = -dot(rel, u_camUp) / d * u_fx + (u_res.y - 1.0) * 0.5;
+    return vec3(u, v, d);
+  }
+
+  float sampleSunShadow(vec3 p, vec3 nrm) {
+    if (u_sunStrength < 0.01) return 0.0;
+    vec3 span = max(u_hi - u_lo, vec3(1e-4));
+    vec3 p0 = p + nrm * 0.24 + vec3(0.0, 0.0, 0.08);
+    float occHit = 0.0;
+    for (int i = 1; i <= 22; i++) {
+      float t = 0.24 + float(i) * 0.16;
+      vec3 q = p0 + u_sunDir * t;
+      vec2 huv = (q.xy - u_lo.xy) / span.xy;
+      if (huv.x < 0.0 || huv.x > 1.0 || huv.y < 0.0 || huv.y > 1.0) break;
+      if (q.z > u_zMaxEnc) break;
+      vec4 h = texture(u_occ, huv);
+      float zLo = h.r * u_zMaxEnc;
+      float zHiTop = h.g * u_zMaxEnc;
+      float zHiBot = h.b * u_zMaxEnc;
+      float pen = 0.14 + t * 0.05;
+      float hLo = smoothstep(zLo + pen * 0.2, zLo - pen, q.z);
+      float hHi = (h.a > 0.45)
+        ? smoothstep(zHiBot - pen, zHiBot + 0.05, q.z) * smoothstep(zHiTop + pen * 0.2, zHiTop - pen, q.z)
+        : 0.0;
+      occHit = max(occHit, max(hLo, hHi));
+      if (occHit > 0.98) break;
+    }
+    return occHit;
+  }
+
+  float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+  }
+
+  void main() {
+    vec2 px = v_uv * u_res;
+    vec4 alb = texture(u_albedo, v_uv);
+    vec4 posTex = texture(u_pos, v_uv);
+    float fg = step(0.15, posTex.a);
+
+    vec3 xyz = u_lo + posTex.rgb * (u_hi - u_lo);
+    vec3 nrm = normalize(texture(u_nrm, v_uv).rgb * 2.0 - 1.0);
+
+    // 1. Dynamic Sky Background + subtle stars at night
+    vec3 sky = mix(u_skyTop, u_skyBot, smoothstep(0.0, 0.95, v_uv.y));
+    if (u_nightFactor > 0.25 && fg < 0.5) {
+      vec2 grid = floor(px * 0.22);
+      float h = hash21(grid);
+      if (h > 0.992) {
+        float twk = 0.5 + 0.5 * sin(u_time * (2.0 + h * 4.0) + h * 50.0);
+        sky += vec3(0.85, 0.92, 1.0) * twk * (u_nightFactor - 0.25) * 0.85;
+      }
+    }
+
+    vec3 stageCol = alb.rgb;
+    float dSurfCam = fg > 0.5 ? length(xyz - u_camB) : 999.0;
+
+    if (fg > 0.5) {
+      // Base time-of-day ambient grade
+      stageCol *= u_ambient;
+
+      // 2. Real-time 3D Directional Sun Shadow Raymarching + Character Cast Shadow
+      if (u_sunStrength > 0.01) {
+        float shStatic = sampleSunShadow(xyz, nrm);
+        float ndotl = max(dot(nrm, u_sunDir), 0.0);
+        float nrmSh = clamp((0.20 - ndotl) / 0.28, 0.0, 1.0) * 0.45;
+        float sh = max(shStatic, nrmSh);
+
+        // Dynamic Character Cast Shadow along -sunDir (with slab occlusion!)
+        float cSlab = (u_charPos.z < u_slabZ - 0.15)
+          ? clamp((u_slabZ - xyz.z) / 0.22, 0.0, 1.0)
+          : clamp((xyz.z - (u_slabZ - 0.55)) / 0.45, 0.15, 1.0);
+        float charCast = 0.0;
+        for (int k = 0; k < 3; k++) {
+          float hk = (k == 0) ? 0.28 : ((k == 1) ? 0.68 : 1.08);
+          float rk = (k == 0) ? 0.27 : ((k == 1) ? 0.26 : 0.22);
+          vec3 spc = vec3(u_charPos.xy, u_charPos.z + hk * (u_charHeight / 1.40));
+          vec3 dv = spc - xyz;
+          float tRay = dot(dv, u_sunDir);
+          float dPerp = length(dv - tRay * u_sunDir);
+          float hit = clamp(1.0 - (dPerp / rk) * (dPerp / rk), 0.0, 1.0)
+                    * clamp((tRay - 0.02) / 0.18, 0.0, 1.0)
+                    * clamp((2.8 - tRay) / 0.8, 0.0, 1.0);
+          charCast = max(charCast, hit);
+        }
+        float dFt = length(xyz.xy - u_charPos.xy);
+        float dzFt = abs(xyz.z - u_charPos.z);
+        float contactAO = exp(-(dFt / 0.28) * (dFt / 0.28)) * exp(-(dzFt / 0.14) * (dzFt / 0.14)) * 0.72;
+        sh = max(sh, max(charCast * cSlab, contactAO));
+
+        float shW = clamp(sh * u_sunStrength, 0.0, 0.82);
+        stageCol = mix(stageCol, stageCol * u_shadowTint, shW);
+
+        // Warm sunlit pop on unshaded sun-facing surfaces
+        float sunPop = clamp(ndotl - 0.20, 0.0, 1.0) * (1.0 - sh);
+        stageCol += stageCol * u_sunWarm * sunPop;
+      }
+
+      // 3. Handheld Lantern 3D Point Light (with multi-layer slab occlusion!)
+      vec3 relightAdd = vec3(0.0);
+      vec3 lw = vec3(u_charPos.xy + u_charFwd * 0.34, u_charPos.z + u_charHeight * 0.56);
+      float pulse = 1.0 + 0.08 * sin(u_time * 5.2);
+      float lanPower = u_lanternOn * (0.20 + 0.80 * u_nightFactor);
+      if (lanPower > 0.02) {
+        vec3 lv = lw - xyz;
+        float d3 = length(lv);
+        vec3 ld = lv / max(d3, 1e-4);
+        float wrap = 0.28 + 0.72 * max(dot(nrm, ld), 0.0);
+        float slabVis = 1.0;
+        if (lw.z < u_slabZ - 0.15) slabVis = clamp((u_slabZ - xyz.z) / 0.24, 0.0, 1.0);
+        else if (lw.z > u_slabZ + 0.12) slabVis = clamp((xyz.z - (u_slabZ - 0.85)) / 0.65, 0.10, 1.0);
+        float atten = (2.15 * lanPower * pulse) * exp(-(d3 / 2.35) * (d3 / 2.35)) / (0.40 + d3 * d3 * 0.85) * slabVis;
+        relightAdd += stageCol * vec3(1.45, 0.90, 0.36) * (wrap * atten);
+      }
+
+      // 4. Static fixture lights at dusk/night
+      if (u_nightFactor > 0.05) {
+        for (int i = 0; i < 4; i++) {
+          if (i >= u_numStatic) break;
+          vec3 sp = u_staticPos[i].xyz;
+          float flk = 1.0 + 0.12 * sin(u_time * (3.1 + float(i) * 0.7) + float(i) * 1.4);
+          float ds = length(sp - xyz);
+          float att = exp(-(ds / 2.0) * (ds / 2.0)) * 0.95 * u_nightFactor * flk;
+          relightAdd += stageCol * u_staticCol[i] * att;
+        }
+      }
+
+      // 5. 14 Drifting 3D Firefly Micro-Lights (real localized 3D surface illumination + slab occlusion!)
+      if (u_fireflyOn > 0.5) {
+        float ffGain = 0.25 + 0.95 * u_nightFactor;
+        for (int i = 0; i < 14; i++) {
+          vec3 fw = u_fireflies[i].xyz;
+          float glow = u_fireflies[i].w;
+          vec3 fv = fw - xyz;
+          float df = length(fv);
+          if (df < 2.6) {
+            float ndf = 0.35 + 0.65 * max(dot(nrm, fv / max(df, 1e-4)), 0.0);
+            float fSlab = 1.0;
+            if (fw.z < u_slabZ - 0.12) fSlab = clamp((u_slabZ - xyz.z) / 0.24, 0.0, 1.0);
+            else if (fw.z > u_slabZ + 0.12) fSlab = clamp((xyz.z - (u_slabZ - 0.75)) / 0.55, 0.12, 1.0);
+            float fatt = (1.15 * ffGain * glow) * exp(-(df / 1.55) * (df / 1.55)) / (0.35 + df * df * 1.2) * fSlab;
+            relightAdd += stageCol * u_fireflyCol * (ndf * fatt);
+          }
+        }
+      }
+
+      stageCol = stageCol + relightAdd;
+    }
+
+    vec3 col = mix(sky, stageCol, alb.a);
+
+    // 6. Depth-Sorted, Normal-Mapped 2.5D Character Sprite (hood-01)
+    vec3 cFeet = proj2d(u_charPos);
+    vec3 cHead = proj2d(vec3(u_charPos.xy, u_charPos.z + u_charHeight));
+    float sprH = max(abs(cFeet.y - cHead.y) * 1.18, 12.0);
+    float sprW = sprH;
+    vec2 sMin = vec2(cFeet.x - sprW * 0.5, cFeet.y - sprH * 0.92);
+    vec2 suv = (px - sMin) / vec2(sprW, sprH);
+
+    if (suv.x >= 0.0 && suv.x <= 1.0 && suv.y >= 0.0 && suv.y <= 1.0) {
+      vec2 tileUV = (u_charTile + suv) / 8.0;
+      vec4 cAlb = texture(u_charAlbedo, tileUV);
+      if (cAlb.a > 0.35) {
+        float dCharCam = length(vec3(u_charPos.xy, u_charPos.z + u_charHeight * 0.45) - u_camB);
+        // Per-pixel 3D depth occlusion behind walls, boulders, and bridge!
+        if (dSurfCam >= dCharCam - 0.28) {
+          vec3 cNrm = normalize(texture(u_charNormal, tileUV).rgb * 2.0 - 1.0);
+          vec3 cCol = cAlb.rgb * mix(vec3(1.0), u_ambient * 1.28, 0.72);
+
+          // Character enters static cast shadows (e.g. under the arched skybridge!)
+          if (u_sunStrength > 0.01) {
+            float cInSh = sampleSunShadow(vec3(u_charPos.xy, u_charPos.z + u_charHeight * 0.52), vec3(0.0, 0.0, 1.0));
+            float shC = cInSh * u_sunStrength * 0.82;
+            cCol = mix(cCol, cCol * u_shadowTint, shC);
+          }
+          // Nighttime normal-mapped lantern warmth + back-facing self-shadow
+          float lanP = u_lanternOn * (0.20 + 0.80 * u_nightFactor);
+          if (lanP > 0.02) {
+            vec2 camDirXY = normalize(u_camB.xy - u_charPos.xy);
+            float facingCam = dot(normalize(u_charFwd), camDirXY);
+            float frontLit = clamp(facingCam * 0.65 + 0.35, 0.0, 1.0);
+            float nLit = max(dot(cNrm, normalize(vec3(0.25, 0.15, 0.95))), 0.0);
+            cCol += cAlb.rgb * vec3(0.65, 0.40, 0.15) * (lanP * frontLit * (0.4 + 0.6 * nLit));
+            // Back-facing cool moonlight rim
+            float backFactor = clamp(-facingCam, 0.0, 1.0);
+            cCol = mix(cCol, cCol * vec3(0.55, 0.65, 0.88), backFactor * 0.50 * u_nightFactor);
+          }
+          col = mix(col, cCol, cAlb.a);
+          dSurfCam = min(dSurfCam, dCharCam);
+        }
+      }
+    }
+
+    // 7. Depth-Occluded Light Halos (Static Lamps + Handheld Lantern + 14 Fireflies!)
+    vec3 halo = vec3(0.0);
+    if (u_nightFactor > 0.05) {
+      for (int i = 0; i < 4; i++) {
+        if (i >= u_numStatic) break;
+        vec3 sp = u_staticPos[i].xyz;
+        vec3 s2 = proj2d(sp);
+        float dsCam = length(sp - u_camB);
+        if (dSurfCam >= dsCam - 0.35) {
+          float r = length(px - s2.xy);
+          float flk = 1.0 + 0.10 * sin(u_time * (3.1 + float(i) * 0.7) + float(i) * 1.4);
+          halo += u_staticCol[i] * (exp(-(r / 12.0) * (r / 12.0)) * 0.38 + exp(-(r / 42.0) * (r / 42.0)) * 0.16) * u_nightFactor * flk;
+        }
+      }
+    }
+
+    float lanPowerH = u_lanternOn * (0.15 + 0.85 * u_nightFactor);
+    if (lanPowerH > 0.05) {
+      vec3 lw = vec3(u_charPos.xy + u_charFwd * 0.34, u_charPos.z + u_charHeight * 0.56);
+      vec3 l2 = proj2d(lw);
+      float dlCam = length(lw - u_camB);
+      vec2 camDirXY = normalize(u_camB.xy - u_charPos.xy);
+      float backF = clamp(-dot(normalize(u_charFwd), camDirXY), 0.0, 1.0);
+      if (dSurfCam >= dlCam - 0.25 && backF < 0.45) {
+        float rl = length(px - l2.xy);
+        float p = 1.0 + 0.08 * sin(u_time * 5.2);
+        halo += (vec3(0.45, 0.32, 0.14) * exp(-(rl / 11.0) * (rl / 11.0)) + vec3(0.18, 0.11, 0.04) * exp(-(rl / 42.0) * (rl / 42.0))) * lanPowerH * p;
+      }
+    }
+
+    if (u_fireflyOn > 0.5) {
+      float ffVis = 0.20 + 0.85 * u_nightFactor;
+      for (int i = 0; i < 14; i++) {
+        vec3 fw = u_fireflies[i].xyz;
+        float glow = u_fireflies[i].w;
+        vec3 f2 = proj2d(fw);
+        float dfCam = length(fw - u_camB);
+        if (dSurfCam >= dfCam - 0.22) {
+          float rf = length(px - f2.xy);
+          if (rf < 36.0) {
+            halo += (vec3(1.0, 0.98, 0.88) * exp(-(rf / 2.6) * (rf / 2.6)) * 0.95
+                   + u_fireflyCol * exp(-(rf / 11.5) * (rf / 11.5)) * 0.45) * (glow * ffVis);
+          }
+        }
+      }
+    }
+
+    col += halo;
+    // Soft highlight roll-off
+    col = clamp(col / (1.0 + 0.20 * max(col - 0.84, 0.0)), 0.0, 1.0);
+    outColor = vec4(col, 1.0);
+  }`;
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'a_pos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  const U = {};
+  for (const name of [
+    'u_albedo','u_pos','u_nrm','u_occ','u_charAlbedo','u_charNormal',
+    'u_res','u_lo','u_hi','u_zMaxEnc','u_slabZ',
+    'u_camTw','u_camB','u_camTarget','u_camFwd','u_camRight','u_camUp','u_fx',
+    'u_skyTop','u_skyBot','u_nightFactor','u_ambient','u_sunDir','u_sunStrength','u_shadowTint','u_sunWarm','u_time',
+    'u_charPos','u_charFwd','u_charTile','u_charHeight','u_lanternOn',
+    'u_numStatic','u_staticPos','u_staticCol','u_fireflyOn','u_fireflyCol','u_fireflies'
+  ]) U[name] = gl.getUniformLocation(prog, name);
+
+  function loadTex(url, nearest = false) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        const f = nearest ? gl.NEAREST : gl.LINEAR;
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+        resolve(tex);
+      };
+      img.onerror = () => reject(new Error('Failed to load ' + url));
+      img.src = url;
+    });
+  }
+
+  // ---- App State ----
+  const state = {
+    theme: 'forest',     // 'forest' | 'desert'
+    timeOfDay: 8.0,      // 0..24h
+    autoTime: false,
+    autoWalk: true,
+    fireflies: true,
+    lantern: true,
+    charPos: [0.0, -3.2, 0.0],
+    charYaw: 180.0,
+    walkPhase: 0.0,
+    autoIdx: 0.0,
+    keys: new Set(),
+    joyVec: [0, 0],
+    tapTarget: null,
+  };
+
+  const LIGHT_COLORS = {
+    soft_ivory: [1.00, 0.76, 0.30],
+    warm_lamp:  [1.00, 0.72, 0.26],
+    soft_aqua:  [0.34, 0.82, 1.00],
+    soft_mint:  [0.64, 1.00, 0.62],
+  };
+
+  // Seeded deterministic 14 fireflies
+  function makeFireflies(lo, hi, slabZ) {
+    let s = 42;
+    const rnd = () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+    const arr = [];
+    for (let k = 0; k < 14; k++) {
+      const upper = (k % 2 === 1);
+      arr.push({
+        cx: lo[0] + 0.9 + rnd() * (hi[0] - lo[0] - 1.8),
+        cy: lo[1] + 0.9 + rnd() * (hi[1] - lo[1] - 1.8),
+        cz: upper ? (slabZ + 0.35 + rnd() * 1.15) : (0.45 + rnd() * (slabZ - 0.75)),
+        ax: 0.32 + rnd() * 0.42, ay: 0.32 + rnd() * 0.42, az: 0.14 + rnd() * 0.22,
+        wx: 0.45 + rnd() * 0.45, wy: 0.45 + rnd() * 0.45, wz: 0.60 + rnd() * 0.50,
+        px: rnd() * 6.28, py: rnd() * 6.28, pz: rnd() * 6.28,
+        pf: 0.85 + rnd() * 1.1, pp: rnd() * 6.28,
+      });
+    }
+    return arr;
+  }
+
+  let meta, nav, traj, textures = {}, fireflyDefs = {};
+  let navGrid = null;
+
+  function buildNavGrid(navData) {
+    const grid = Array.from({ length: navData.ny }, () => Array(navData.nx).fill(null));
+    for (const c of navData.walkable_cells) grid[c.iy][c.ix] = c.spans;
+    return grid;
+  }
+
+  function queryNav(x, y, curZ) {
+    const b = nav.bounds;
+    const ix = Math.round((x - b.x_min) / nav.grid_res_m);
+    const iy = Math.round((y - b.y_min) / nav.grid_res_m);
+    if (ix < 0 || ix >= nav.nx || iy < 0 || iy >= nav.ny) return null;
+    const sps = navGrid[iy][ix];
+    if (!sps || sps.length === 0) return null;
+    let best = null, bestDz = 999;
+    for (const sp of sps) {
+      const dz = Math.abs(sp.z - curZ);
+      if (dz <= 0.62 && dz < bestDz) { best = sp; bestDz = dz; }
+    }
+    return best;
+  }
+
+  // ---- Time-of-Day Lighting Curves ----
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function lerp3(a, b, t) { return [lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t)]; }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  function evalLighting(hour, theme) {
+    const isDesert = (theme === 'desert');
+    // Keyframes: [hour, skyTop, skyBot, ambient, shadowTint, sunWarm, nightFactor, sunStrength]
+    const kf = isDesert ? [
+      [0.0,  [0.07,0.10,0.20], [0.14,0.18,0.30], [0.24,0.29,0.44], [0.35,0.40,0.62], [0.00,0.00,0.00], 1.00, 0.00],
+      [5.5,  [0.14,0.18,0.34], [0.46,0.34,0.42], [0.45,0.42,0.52], [0.42,0.42,0.65], [0.16,0.08,0.02], 0.65, 0.35],
+      [8.0,  [0.38,0.56,0.82], [0.76,0.82,0.88], [0.96,0.95,0.94], [0.48,0.54,0.74], [0.10,0.08,0.02], 0.00, 0.58],
+      [12.5, [0.30,0.54,0.86], [0.68,0.80,0.92], [1.04,1.02,0.98], [0.50,0.54,0.72], [0.08,0.06,0.02], 0.00, 0.56],
+      [17.6, [0.48,0.36,0.54], [0.88,0.54,0.38], [0.90,0.72,0.62], [0.36,0.34,0.66], [0.28,0.11,0.00], 0.12, 0.72],
+      [19.5, [0.14,0.15,0.30], [0.42,0.26,0.36], [0.36,0.34,0.48], [0.34,0.36,0.62], [0.10,0.04,0.00], 0.78, 0.20],
+      [21.5, [0.07,0.10,0.20], [0.14,0.18,0.30], [0.24,0.29,0.44], [0.35,0.40,0.62], [0.00,0.00,0.00], 1.00, 0.00],
+      [24.0, [0.07,0.10,0.20], [0.14,0.18,0.30], [0.24,0.29,0.44], [0.35,0.40,0.62], [0.00,0.00,0.00], 1.00, 0.00],
+    ] : [
+      [0.0,  [0.04,0.09,0.16], [0.08,0.16,0.24], [0.22,0.31,0.44], [0.32,0.42,0.58], [0.00,0.00,0.00], 1.00, 0.00],
+      [5.5,  [0.08,0.18,0.26], [0.24,0.36,0.38], [0.48,0.54,0.58], [0.40,0.50,0.64], [0.14,0.10,0.04], 0.55, 0.38],
+      [8.0,  [0.10,0.25,0.24], [0.22,0.42,0.36], [1.00,1.02,0.98], [0.44,0.56,0.68], [0.14,0.12,0.04], 0.00, 0.60],
+      [12.5, [0.12,0.30,0.28], [0.26,0.48,0.42], [1.06,1.06,1.02], [0.46,0.56,0.66], [0.10,0.08,0.03], 0.00, 0.54],
+      [17.6, [0.22,0.24,0.34], [0.58,0.42,0.34], [0.88,0.74,0.64], [0.36,0.38,0.62], [0.26,0.12,0.02], 0.15, 0.68],
+      [19.5, [0.08,0.14,0.24], [0.20,0.24,0.34], [0.34,0.38,0.50], [0.32,0.40,0.58], [0.08,0.04,0.00], 0.78, 0.18],
+      [21.5, [0.04,0.09,0.16], [0.08,0.16,0.24], [0.22,0.31,0.44], [0.32,0.42,0.58], [0.00,0.00,0.00], 1.00, 0.00],
+      [24.0, [0.04,0.09,0.16], [0.08,0.16,0.24], [0.22,0.31,0.44], [0.32,0.42,0.58], [0.00,0.00,0.00], 1.00, 0.00],
+    ];
+    let i = 0;
+    while (i < kf.length - 2 && hour > kf[i + 1][0]) i++;
+    const a = kf[i], b = kf[i + 1];
+    const t = clamp((hour - a[0]) / Math.max(b[0] - a[0], 1e-4), 0, 1);
+
+    // Sun arc from 5:30 (east/left low) -> 12:30 (high) -> 18:30 (west/low long shadow)
+    const dayPhase = clamp((hour - 5.5) / 13.0, 0, 1);
+    const elev = Math.sin(dayPhase * Math.PI) * 0.78 + 0.14;
+    const sunX = lerp(-0.42, -0.84, dayPhase);
+    const sunY = lerp(-0.48, -0.26, dayPhase);
+    const len = Math.hypot(sunX, sunY, elev);
+
+    return {
+      skyTop: lerp3(a[1], b[1], t),
+      skyBot: lerp3(a[2], b[2], t),
+      ambient: lerp3(a[3], b[3], t),
+      shadowTint: lerp3(a[4], b[4], t),
+      sunWarm: lerp3(a[5], b[5], t),
+      nightFactor: lerp(a[6], b[6], t),
+      sunStrength: lerp(a[7], b[7], t),
+      sunDir: [sunX / len, sunY / len, elev / len],
+    };
+  }
+
+  // ---- UI Sync ----
+  const btnTheme = document.getElementById('btnTheme');
+  const btnAutoWalk = document.getElementById('btnAutoWalk');
+  const btnFireflies = document.getElementById('btnFireflies');
+  const btnLantern = document.getElementById('btnLantern');
+  const btnCycle = document.getElementById('btnCycle');
+  const timeSlider = document.getElementById('timeSlider');
+  const timeLabel = document.getElementById('timeLabel');
+  const themeBadge = document.getElementById('themeBadge');
+  const joystick = document.getElementById('joystick');
+  const joyKnob = document.getElementById('joyKnob');
+
+  function fmtTime(h) {
+    const hh = Math.floor(h) % 24;
+    const mm = Math.floor((h - Math.floor(h)) * 60);
+    const tag = (h < 5.5 || h >= 20.0) ? 'Night' : (h < 10.5 ? 'Morning' : (h < 15.5 ? 'Noon' : 'Sunset'));
+    return `${String(hh).padStart(2,'0')}:${String(mm).padStart(2,'0')} ${tag}`;
+  }
+
+  function syncUI() {
+    const isF = state.theme === 'forest';
+    themeBadge.textContent = isF ? 'Forest Ruins' : 'Desert Ruins';
+    btnTheme.classList.toggle('forest', isF);
+    btnTheme.classList.add('active');
+    btnAutoWalk.classList.toggle('active', state.autoWalk);
+    btnAutoWalk.innerHTML = state.autoWalk ? '🚶 Auto Walk <span class="kbd">Space</span>' : '🕹️ Manual <span class="kbd">Space</span>';
+    joystick.classList.toggle('dim', state.autoWalk);
+    btnFireflies.classList.toggle('active', state.fireflies);
+    btnLantern.classList.toggle('active', state.lantern);
+    btnCycle.classList.toggle('active', state.autoTime);
+    timeSlider.value = state.timeOfDay.toFixed(2);
+    timeLabel.textContent = fmtTime(state.timeOfDay);
+  }
+
+  function toggleTheme() { state.theme = (state.theme === 'forest') ? 'desert' : 'forest'; syncUI(); }
+  function setPreset(h) { state.timeOfDay = h; state.autoTime = false; syncUI(); }
+
+  btnTheme.onclick = toggleTheme;
+  btnAutoWalk.onclick = () => { state.autoWalk = !state.autoWalk; state.tapTarget = null; syncUI(); };
+  btnFireflies.onclick = () => { state.fireflies = !state.fireflies; syncUI(); };
+  btnLantern.onclick = () => { state.lantern = !state.lantern; syncUI(); };
+  btnCycle.onclick = () => { state.autoTime = !state.autoTime; syncUI(); };
+  document.getElementById('btnMorning').onclick = () => setPreset(8.0);
+  document.getElementById('btnNoon').onclick = () => setPreset(12.5);
+  document.getElementById('btnSunset').onclick = () => setPreset(17.6);
+  document.getElementById('btnNight').onclick = () => setPreset(22.5);
+  timeSlider.oninput = (e) => { state.timeOfDay = parseFloat(e.target.value); state.autoTime = false; syncUI(); };
+
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) {
+      if (state.autoWalk) { state.autoWalk = false; syncUI(); }
+      state.tapTarget = null;
+      state.keys.add(k);
+      e.preventDefault();
+    } else if (k === 't') { toggleTheme(); }
+    else if (k === ' ') { state.autoWalk = !state.autoWalk; state.tapTarget = null; syncUI(); e.preventDefault(); }
+    else if (k === 'f') { state.fireflies = !state.fireflies; syncUI(); }
+    else if (k === 'l') { state.lantern = !state.lantern; syncUI(); }
+    else if (k === 'c') { state.autoTime = !state.autoTime; syncUI(); }
+    else if (k === '1') setPreset(8.0);
+    else if (k === '2') setPreset(12.5);
+    else if (k === '3') setPreset(17.6);
+    else if (k === '4') setPreset(22.5);
+  });
+  window.addEventListener('keyup', (e) => state.keys.delete(e.key.toLowerCase()));
+
+  // ---- Virtual Joystick (Touch & Mouse) ----
+  let joyId = null;
+  function updateJoy(clientX, clientY) {
+    const r = joystick.getBoundingClientRect();
+    const cx = r.left + r.width * 0.5, cy = r.top + r.height * 0.5;
+    let dx = clientX - cx, dy = clientY - cy;
+    const maxR = r.width * 0.36;
+    const d = Math.hypot(dx, dy);
+    if (d > maxR) { dx = dx / d * maxR; dy = dy / d * maxR; }
+    joyKnob.style.transform = `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)`;
+    state.joyVec = [dx / maxR, dy / maxR];
+    if (d > 6 && state.autoWalk) { state.autoWalk = false; state.tapTarget = null; syncUI(); }
+  }
+  joystick.addEventListener('pointerdown', (e) => {
+    e.stopPropagation();
+    joyId = e.pointerId;
+    joystick.setPointerCapture(joyId);
+    updateJoy(e.clientX, e.clientY);
+  });
+  joystick.addEventListener('pointermove', (e) => { if (e.pointerId === joyId) updateJoy(e.clientX, e.clientY); });
+  const endJoy = (e) => {
+    if (e.pointerId !== joyId) return;
+    joyId = null; state.joyVec = [0, 0];
+    joyKnob.style.transform = 'translate(0px, 0px)';
+  };
+  joystick.addEventListener('pointerup', endJoy);
+  joystick.addEventListener('pointercancel', endJoy);
+
+  // Tap/Drag on Canvas to walk toward finger/cursor
+  let canvasPtr = null;
+  function setTapFromEvent(e) {
+    if (!meta) return;
+    const rect = canvas.getBoundingClientRect();
+    const u = (e.clientX - rect.left) / rect.width * meta.width;
+    const v = (e.clientY - rect.top) / rect.height * meta.height;
+    // Project character's current screen pos and walk in that screen direction!
+    const cp = jsProj2d(state.charPos);
+    const sdx = u - cp[0], sdy = v - cp[1];
+    if (Math.hypot(sdx, sdy) > 10) {
+      if (state.autoWalk) { state.autoWalk = false; syncUI(); }
+      state.tapTarget = [u, v];
+    }
+  }
+  canvas.addEventListener('pointerdown', (e) => { canvasPtr = e.pointerId; canvas.setPointerCapture(canvasPtr); setTapFromEvent(e); });
+  canvas.addEventListener('pointermove', (e) => { if (e.pointerId === canvasPtr) setTapFromEvent(e); });
+  canvas.addEventListener('pointerup', (e) => { if (e.pointerId === canvasPtr) { canvasPtr = null; state.tapTarget = null; } });
+  canvas.addEventListener('pointercancel', () => { canvasPtr = null; state.tapTarget = null; });
+
+  // ---- Camera Basis (matches Python) ----
+  let camTw, camB, camTarget, camFwd, camRight, camUp, fxVal;
+  function initCamera(c) {
+    const az = c.front * Math.PI / 180, el = c.pitch * Math.PI / 180;
+    camTw = [c.dist * Math.sin(az) * Math.cos(el), c.dist * Math.sin(el), c.dist * Math.cos(az) * Math.cos(el)];
+    camTarget = c.target;
+    camB = [camTw[0] + camTarget[0], -camTw[2] + camTarget[2], camTw[1] - camTarget[1]];
+    const fl = Math.hypot(camTw[0], camTw[1], camTw[2]);
+    camFwd = [-camTw[0]/fl, -camTw[1]/fl, -camTw[2]/fl];
+    // right = normalize(cross(fwd, [0,1,0]))
+    const rx = -camFwd[2], ry = 0, rz = camFwd[0];
+    const rl = Math.hypot(rx, ry, rz);
+    camRight = [rx/rl, ry/rl, rz/rl];
+    // up = cross(right, fwd)
+    camUp = [
+      camRight[1]*camFwd[2] - camRight[2]*camFwd[1],
+      camRight[2]*camFwd[0] - camRight[0]*camFwd[2],
+      camRight[0]*camFwd[1] - camRight[1]*camFwd[0],
+    ];
+    fxVal = (meta.height * 0.5) / Math.tan((c.fov * 0.5) * Math.PI / 180);
+  }
+  function jsProj2d(pb) {
+    const tw = [pb[0] - camTarget[0], pb[2] - (-camTarget[1]), -(pb[1] - camTarget[2])];
+    const rel = [tw[0]-camTw[0], tw[1]-camTw[1], tw[2]-camTw[2]];
+    const d = rel[0]*camFwd[0] + rel[1]*camFwd[1] + rel[2]*camFwd[2];
+    const u = (rel[0]*camRight[0] + rel[1]*camRight[1] + rel[2]*camRight[2]) / d * fxVal + (meta.width - 1) * 0.5;
+    const v = -(rel[0]*camUp[0] + rel[1]*camUp[1] + rel[2]*camUp[2]) / d * fxVal + (meta.height - 1) * 0.5;
+    return [u, v, d];
+  }
+
+  // ---- Boot & Main Loop ----
+  async function boot() {
+    const [mRes, nRes, tRes] = await Promise.all([
+      fetch('assets/scene_meta.json').then(r => r.json()),
+      fetch('assets/nav_surface.json').then(r => r.json()),
+      fetch('assets/walk_3d_trajectory.json').then(r => r.json()),
+    ]);
+    meta = mRes; nav = nRes; traj = tRes;
+    navGrid = buildNavGrid(nav);
+    initCamera(meta.cam);
+
+    const [fa, fp, fn, fo, da, dp, dn, do_, ca, cn] = await Promise.all([
+      loadTex('assets/forest_albedo.png'),
+      loadTex('assets/forest_pos.png', true),
+      loadTex('assets/forest_nrm.png'),
+      loadTex('assets/forest_occ.png', true),
+      loadTex('assets/desert_albedo.png'),
+      loadTex('assets/desert_pos.png', true),
+      loadTex('assets/desert_nrm.png'),
+      loadTex('assets/desert_occ.png', true),
+      loadTex('assets/hood01_albedo.png', true),
+      loadTex('assets/hood01_normal.png', true),
+    ]);
+    textures = {
+      forest: { albedo: fa, pos: fp, nrm: fn, occ: fo },
+      desert: { albedo: da, pos: dp, nrm: dn, occ: do_ },
+      charAlbedo: ca, charNormal: cn,
+    };
+    fireflyDefs.forest = makeFireflies(meta.themes.forest.lo, meta.themes.forest.hi, 1.82);
+    fireflyDefs.desert = makeFireflies(meta.themes.desert.lo, meta.themes.desert.hi, 1.82);
+
+    document.getElementById('loading').classList.add('hidden');
+    syncUI();
+
+    let lastTs = performance.now();
+    let fpsAcc = 0, fpsCnt = 0;
+    const fpsEl = document.getElementById('fpsStat');
+    const posEl = document.getElementById('posStat');
+
+    function tick(now) {
+      const dt = Math.min((now - lastTs) * 0.001, 0.05);
+      lastTs = now;
+      fpsAcc += dt; fpsCnt++;
+      if (fpsAcc >= 0.4) {
+        fpsEl.textContent = Math.round(fpsCnt / fpsAcc) + ' fps';
+        fpsAcc = 0; fpsCnt = 0;
+      }
+
+      if (state.autoTime) {
+        state.timeOfDay = (state.timeOfDay + dt * 1.15) % 24.0;
+        timeSlider.value = state.timeOfDay.toFixed(2);
+        timeLabel.textContent = fmtTime(state.timeOfDay);
+      }
+
+      // Character movement
+      if (state.autoWalk) {
+        state.autoIdx = (state.autoIdx + dt * 10.5) % traj.length;
+        const i0 = Math.floor(state.autoIdx);
+        const i1 = (i0 + 1) % traj.length;
+        const f = state.autoIdx - i0;
+        const a = traj[i0], b = traj[i1];
+        state.charPos = [lerp(a.x, b.x, f), lerp(a.y, b.y, f), lerp(a.z, b.z, f)];
+        let dyaw = b.yaw_deg - a.yaw_deg;
+        if (dyaw > 180) dyaw -= 360;
+        if (dyaw < -180) dyaw += 360;
+        state.charYaw = (a.yaw_deg + dyaw * f + 360) % 360;
+        state.walkPhase = (state.walkPhase + dt * 9.0) % 8.0;
+      } else {
+        // Screen-aligned input vector (sx right, sy down)
+        let sx = state.joyVec[0], sy = state.joyVec[1];
+        if (state.keys.has('a') || state.keys.has('arrowleft'))  sx -= 1;
+        if (state.keys.has('d') || state.keys.has('arrowright')) sx += 1;
+        if (state.keys.has('w') || state.keys.has('arrowup'))    sy -= 1;
+        if (state.keys.has('s') || state.keys.has('arrowdown'))  sy += 1;
+        if (state.tapTarget && Math.hypot(sx, sy) < 0.05) {
+          const cp = jsProj2d(state.charPos);
+          const dx = state.tapTarget[0] - cp[0], dy = state.tapTarget[1] - cp[1];
+          const dd = Math.hypot(dx, dy);
+          if (dd > 14) { sx = dx / dd; sy = dy / dd; }
+        }
+        const mag = Math.hypot(sx, sy);
+        if (mag > 0.08) {
+          sx /= Math.max(mag, 1.0); sy /= Math.max(mag, 1.0);
+          // Rotate screen input into Blender XY using camera azimuth (-20 deg)
+          const az = meta.cam.front * Math.PI / 180;
+          const rightX = Math.cos(az), rightY = Math.sin(az);
+          const fwdX = -Math.sin(az), fwdY = Math.cos(az);
+          const vx = (sx * rightX - sy * fwdX) * 2.15;
+          const vy = (sx * rightY - sy * fwdY) * 2.15;
+          const nx = state.charPos[0] + vx * dt;
+          const ny = state.charPos[1] + vy * dt;
+          const spBoth = queryNav(nx, ny, state.charPos[2]);
+          if (spBoth) {
+            state.charPos = [nx, ny, lerp(state.charPos[2], spBoth.z, 0.35)];
+          } else {
+            const spX = queryNav(nx, state.charPos[1], state.charPos[2]);
+            const spY = queryNav(state.charPos[0], ny, state.charPos[2]);
+            if (spX) state.charPos = [nx, state.charPos[1], lerp(state.charPos[2], spX.z, 0.35)];
+            else if (spY) state.charPos = [state.charPos[0], ny, lerp(state.charPos[2], spY.z, 0.35)];
+          }
+          state.charYaw = (Math.atan2(vx, -vy) * 180 / Math.PI + 360) % 360;
+          state.walkPhase = (state.walkPhase + dt * 10.5 * Math.min(mag, 1.0)) % 8.0;
+        }
+      }
+
+      const layerNum = state.charPos[2] > 1.55 ? 1 : 0;
+      posEl.textContent = `Layer ${layerNum} · z=${state.charPos[2].toFixed(2)}m`;
+
+      // Bind textures
+      const th = meta.themes[state.theme];
+      const tx = textures[state.theme];
+      const bind = (unit, t, loc) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); gl.uniform1i(loc, unit); };
+      bind(0, tx.albedo, U.u_albedo);
+      bind(1, tx.pos, U.u_pos);
+      bind(2, tx.nrm, U.u_nrm);
+      bind(3, tx.occ, U.u_occ);
+      bind(4, textures.charAlbedo, U.u_charAlbedo);
+      bind(5, textures.charNormal, U.u_charNormal);
+
+      gl.uniform2f(U.u_res, meta.width, meta.height);
+      gl.uniform3fv(U.u_lo, th.lo);
+      gl.uniform3fv(U.u_hi, th.hi);
+      gl.uniform1f(U.u_zMaxEnc, th.z_max_enc);
+      gl.uniform1f(U.u_slabZ, 1.82);
+
+      gl.uniform3fv(U.u_camTw, camTw);
+      gl.uniform3fv(U.u_camB, camB);
+      gl.uniform3fv(U.u_camTarget, camTarget);
+      gl.uniform3fv(U.u_camFwd, camFwd);
+      gl.uniform3fv(U.u_camRight, camRight);
+      gl.uniform3fv(U.u_camUp, camUp);
+      gl.uniform1f(U.u_fx, fxVal);
+
+      const L = evalLighting(state.timeOfDay, state.theme);
+      gl.uniform3fv(U.u_skyTop, L.skyTop);
+      gl.uniform3fv(U.u_skyBot, L.skyBot);
+      gl.uniform1f(U.u_nightFactor, L.nightFactor);
+      gl.uniform3fv(U.u_ambient, L.ambient);
+      gl.uniform3fv(U.u_sunDir, L.sunDir);
+      gl.uniform1f(U.u_sunStrength, L.sunStrength);
+      gl.uniform3fv(U.u_shadowTint, L.shadowTint);
+      gl.uniform3fv(U.u_sunWarm, L.sunWarm);
+      const tSec = now * 0.001;
+      gl.uniform1f(U.u_time, tSec);
+
+      const yr = state.charYaw * Math.PI / 180;
+      gl.uniform3fv(U.u_charPos, state.charPos);
+      gl.uniform2f(U.u_charFwd, Math.sin(yr), -Math.cos(yr));
+      const dirIdx = Math.round(((state.charYaw + meta.cam.front + 360) % 360) / 45) % 8;
+      gl.uniform2f(U.u_charTile, Math.floor(state.walkPhase) % 8, dirIdx);
+      gl.uniform1f(U.u_charHeight, 1.40);
+      gl.uniform1f(U.u_lanternOn, state.lantern ? 1.0 : 0.0);
+
+      // Static fixture lights
+      const sPos = new Float32Array(16), sCol = new Float32Array(12);
+      const nSt = Math.min(th.lights.length, 4);
+      for (let i = 0; i < nSt; i++) {
+        const lt = th.lights[i];
+        sPos[i*4] = lt.x; sPos[i*4+1] = lt.y; sPos[i*4+2] = lt.z ?? 1.2; sPos[i*4+3] = lt.radius_m ?? 2.2;
+        const c = LIGHT_COLORS[lt.kind] || [1.0, 0.78, 0.34];
+        sCol[i*3] = c[0]; sCol[i*3+1] = c[1]; sCol[i*3+2] = c[2];
+      }
+      gl.uniform1i(U.u_numStatic, nSt);
+      gl.uniform4fv(U.u_staticPos, sPos);
+      gl.uniform3fv(U.u_staticCol, sCol);
+
+      // 14 Drifting 3D Fireflies
+      const ffBuf = new Float32Array(14 * 4);
+      const ffs = fireflyDefs[state.theme];
+      for (let i = 0; i < 14; i++) {
+        const f = ffs[i];
+        ffBuf[i*4]   = f.cx + f.ax * Math.sin(f.wx * tSec + f.px);
+        ffBuf[i*4+1] = f.cy + f.ay * Math.cos(f.wy * tSec + f.py);
+        ffBuf[i*4+2] = f.cz + f.az * Math.sin(f.wz * tSec + f.pz);
+        ffBuf[i*4+3] = 0.28 + 0.72 * Math.pow(0.5 + 0.5 * Math.sin(f.pf * tSec + f.pp), 1.6);
+      }
+      gl.uniform1f(U.u_fireflyOn, state.fireflies ? 1.0 : 0.0);
+      gl.uniform3fv(U.u_fireflyCol, state.theme === 'forest' ? [0.78, 1.00, 0.44] : [1.00, 0.86, 0.42]);
+      gl.uniform4fv(U.u_fireflies, ffBuf);
+
+      gl.viewport(0, 0, meta.width, meta.height);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // Optional URL params: ?theme=desert&time=17.6
+  const qp = new URLSearchParams(window.location.search);
+  if (qp.get('theme') === 'desert' || qp.get('theme') === 'forest') state.theme = qp.get('theme');
+  if (qp.has('time')) { const t = parseFloat(qp.get('time')); if (!Number.isNaN(t)) state.timeOfDay = clamp(t, 0, 24); }
+
+  boot().catch(err => {
+    document.getElementById('loadingText').textContent = 'Error: ' + err.message;
+    console.error(err);
+  });
+})();
+</script>
+</body>
+</html>
