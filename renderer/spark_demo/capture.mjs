@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,22 +56,8 @@ const profile = await mkdtemp(fileURLToPath(new URL('temp/chrome-', root)));
 const useSoftware = process.env.SPARK_SOFTWARE === '1';
 const gpuFlags = useSoftware
   ? ['--headless', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
-  : process.platform === 'win32'
-    ? ['--headless=new', '--use-gl=angle', '--use-angle=d3d11', '--enable-webgl', '--ignore-gpu-blocklist']
-    : ['--headless=new', '--enable-webgl', '--ignore-gpu-blocklist'];
-function findChrome() {
-  if (process.env.SPARK_CHROME) return process.env.SPARK_CHROME;
-  const candidates = [
-    'C:/Program Files/Google/Chrome/Application/chrome.exe',
-    'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/usr/bin/google-chrome',
-    '/usr/bin/chromium',
-    '/usr/bin/chromium-browser',
-  ];
-  return candidates.find(p => existsSync(p)) || 'google-chrome';
-}
-const chrome = spawn(findChrome(), [
+  : ['--headless=new', '--use-gl=angle', '--use-angle=d3d11', '--enable-webgl', '--ignore-gpu-blocklist'];
+const chrome = spawn(process.env.SPARK_CHROME || 'C:/Program Files/Google/Chrome/Application/chrome.exe', [
   ...gpuFlags, '--disable-background-networking',
   '--disable-extensions', '--no-first-run', '--remote-debugging-port=0', `--user-data-dir=${profile}`,
   `http://127.0.0.1:${server.address().port}/capture.html`,
@@ -133,8 +118,9 @@ try {
   const out = new URL(`${destination}/`, root);
   await mkdir(out, { recursive: true });
   let pendingWrite = Promise.resolve();
-  async function capture(paths, angle, filename) {
-    const params = [paths, staticPaths, options, angle].map(item => JSON.stringify(item));
+  async function capture(paths, angle, filename, camOverride = null) {
+    const cam = camOverride ? { ...options, ...camOverride } : options;
+    const params = [paths, staticPaths, cam, camOverride?.front ?? angle].map(item => JSON.stringify(item));
     const png = await evaluate(`capture.draw(${params.join(',')})`);
     assert(png?.length > 4000, `Empty capture ${filename}`);
     await pendingWrite;
@@ -180,7 +166,7 @@ try {
     const manifest = { camera: options, asset: baseline, fps, frames };
     await writeFile(new URL('manifest.json', out), JSON.stringify(manifest, null, 2));
   } else {
-    for (const frame of sequence.frames) await capture(framePaths(frame), options.front, frame.png);
+    for (const frame of sequence.frames) await capture(framePaths(frame), options.front, frame.png, frame.camera || null);
     const shots = { front: options.front, side: options.side, back: options.front + 180 };
     for (const frame of sequence.frames.filter(f => sequence.review.includes(f.blenderFrame))) {
       for (const [name, angle] of Object.entries(shots)) await capture(framePaths(frame), angle, `${name}-${frame.png}`);

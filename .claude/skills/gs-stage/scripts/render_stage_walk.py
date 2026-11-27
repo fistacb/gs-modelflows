@@ -56,7 +56,10 @@ def main() -> None:
     ap.add_argument("--cam-front", type=float, default=-20.0)
     ap.add_argument("--cam-pitch", type=float, default=19.0)
     ap.add_argument("--cam-dist", type=float, default=12.2)
+    ap.add_argument("--width", type=int, default=640)
+    ap.add_argument("--height", type=int, default=420)
     ap.add_argument("--duration-ms", type=int, default=90)
+    ap.add_argument("--skip-gif", action="store_true", help="Skip GIF encoding (useful when piping HD PNGs straight to relight_stage_walk.py --out-mp4).")
     ap.add_argument("--look-around", action="store_true", help="Add curious head/neck/chest look-around motion while walking.")
     ap.add_argument("--hand-prop", type=Path, default=None, help="Optional handheld v1_prop/prop.ply (e.g. lantern cage) attached to hand_R.")
     args = ap.parse_args()
@@ -174,13 +177,17 @@ def main() -> None:
         write_ply(args.spark_dir / rel, blender_to_spark_data(ch))
         seq.append({"blenderFrame": fi, "ply": [rel], "png": f"f_{fi:03d}.png"})
 
-    W, H = 640, 420
+    W, H = args.width, args.height
     cam = {"width": W, "height": H, "background": args.bg_hex, "target": [0.0, -1.15, 0.25], "distance": args.cam_dist, "pitch": args.cam_pitch, "fov": 35.0, "front": args.cam_front, "side": args.cam_front + 90.0}
     crel = f"frames/{tag}/cam.json"
     mrel = f"frames/{tag}/man.json"
     (args.spark_dir / crel).write_text(json.dumps(cam), encoding="utf-8")
     (args.spark_dir / mrel).write_text(json.dumps({"static": [map_rel], "review": [], "frames": seq}), encoding="utf-8")
     subprocess.run(["node", "capture.mjs", tag, f"{tag}_out", crel, mrel], cwd=str(args.spark_dir), check=True, capture_output=True)
+
+    if args.skip_gif:
+        print(f"Rendered {len(traj)} HD frames ({W}x{H}) in {time.time()-t0:.1f}s -> {args.spark_dir / f'{tag}_out'}", flush=True)
+        return
 
     frs = [Image.open(args.spark_dir / f"{tag}_out" / f"f_{fi:03d}.png").convert("RGB") for fi in range(len(traj))]
     strip = Image.new("RGB", (W * 4, H))

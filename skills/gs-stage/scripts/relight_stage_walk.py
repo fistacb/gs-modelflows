@@ -49,7 +49,9 @@ def main() -> None:
     ap.add_argument("--frames-dir", type=Path, required=True, help="Directory of rendered walkthrough PNGs (f_000.png ...).")
     ap.add_argument("--frame-json", type=Path, required=True, help="Volumetric 3D frame JSON (volumes + lights).")
     ap.add_argument("--trajectory", type=Path, required=True, help="walk_3d_trajectory.json.")
-    ap.add_argument("--out-gif", type=Path, required=True, help="Output relit animated GIF path.")
+    ap.add_argument("--out-gif", type=Path, default=None, help="Output relit animated GIF path.")
+    ap.add_argument("--out-mp4", type=Path, default=None, help="Optional full-res H.264 .mp4 video output path (via ffmpeg).")
+    ap.add_argument("--fps", type=int, default=24, help="Frame rate for --out-mp4 (default: 24).")
     ap.add_argument("--spark-dir", type=Path, required=True, help="spark_demo directory for 1-frame Position Map render.")
     ap.add_argument("--cam-front", type=float, default=-20.0)
     ap.add_argument("--cam-pitch", type=float, default=19.0)
@@ -95,7 +97,8 @@ def main() -> None:
     fdc_p = (nrgb - 0.5) / SH_C0
     pos_s["f_dc_0"], pos_s["f_dc_1"], pos_s["f_dc_2"] = fdc_p[:, 0], fdc_p[:, 1], fdc_p[:, 2]
 
-    tag = f"relight_{args.out_gif.stem}"
+    tag_stem = (args.out_mp4 or args.out_gif or Path("relight")).stem
+    tag = f"relight_{tag_stem}"
     tmp_dir = args.spark_dir / "frames" / tag
     tmp_dir.mkdir(parents=True, exist_ok=True)
     pos_rel = f"frames/{tag}/stage_pos.ply"
@@ -392,14 +395,30 @@ def main() -> None:
         comp = np.clip(comp / (1.0 + 0.22 * np.maximum(comp - 0.82, 0.0)), 0.0, 1.0)
         out_frs.append(Image.fromarray((comp * 255.0 + 0.5).astype(np.uint8), mode="RGB"))
 
-    args.out_gif.parent.mkdir(parents=True, exist_ok=True)
-    strip = Image.new("RGB", (W * 4, H))
-    for k, idx in enumerate(np.linspace(0, n_frs - 1, 4).round().astype(int)):
-        strip.paste(out_frs[idx], (k * W, 0))
-    pal = strip.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
-    qfrs = [f.resize((480, int(round(480 * H / W))), Image.Resampling.LANCZOS).quantize(palette=pal, dither=Image.Dither.NONE) for f in out_frs]
-    qfrs[0].save(args.out_gif, save_all=True, append_images=qfrs[1:], duration=args.duration_ms, loop=0, optimize=True)
-    print(f"Saved real-time 3D relit GIF ({args.out_gif.stat().st_size/1024:.1f} KB) in {time.time()-t0:.1f}s -> {args.out_gif}", flush=True)
+    if args.out_mp4 is not None:
+        args.out_mp4.parent.mkdir(parents=True, exist_ok=True)
+        relit_dir = args.out_mp4.parent / f"{args.out_mp4.stem}_frames"
+        relit_dir.mkdir(parents=True, exist_ok=True)
+        for fi, im in enumerate(out_frs):
+            im.save(relit_dir / f"f_{fi:04d}.png")
+        subprocess.run([
+            "ffmpeg", "-y", "-framerate", str(args.fps),
+            "-i", str(relit_dir / "f_%04d.png"),
+            "-c:v", "libx264", "-crf", "16", "-preset", "slow",
+            "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+            str(args.out_mp4),
+        ], check=True, capture_output=True)
+        print(f"Saved HD 3D relit MP4 ({args.out_mp4.stat().st_size/1024:.1f} KB, {W}x{H} @ {args.fps}fps) in {time.time()-t0:.1f}s -> {args.out_mp4}", flush=True)
+
+    if args.out_gif is not None:
+        args.out_gif.parent.mkdir(parents=True, exist_ok=True)
+        strip = Image.new("RGB", (W * 4, H))
+        for k, idx in enumerate(np.linspace(0, n_frs - 1, 4).round().astype(int)):
+            strip.paste(out_frs[idx], (k * W, 0))
+        pal = strip.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+        qfrs = [f.resize((480, int(round(480 * H / W))), Image.Resampling.LANCZOS).quantize(palette=pal, dither=Image.Dither.NONE) for f in out_frs]
+        qfrs[0].save(args.out_gif, save_all=True, append_images=qfrs[1:], duration=args.duration_ms, loop=0, optimize=True)
+        print(f"Saved real-time 3D relit GIF ({args.out_gif.stat().st_size/1024:.1f} KB) in {time.time()-t0:.1f}s -> {args.out_gif}", flush=True)
 
 
 if __name__ == "__main__":
