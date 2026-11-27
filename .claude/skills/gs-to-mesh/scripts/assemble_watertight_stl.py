@@ -35,8 +35,11 @@ def parse_cli_args():
     parser.add_argument("--out-glb", type=Path, default=None, help="Optional .glb export path.")
     parser.add_argument("--report", type=Path, default=None, help="Optional JSON validation report path.")
     parser.add_argument("--voxel-size", type=float, default=0.0024, help="Blender VOXEL remesh size in model units.")
-    parser.add_argument("--smooth-iters", type=int, default=6, help="Volume-preserving Taubin smooth iterations on body before base union (0 to disable).")
-    parser.add_argument("--post-smooth-iters", type=int, default=1, help="Light Taubin smooth iterations after voxel remesh to remove stair-stepping.")
+    parser.add_argument("--smooth-iters", type=int, default=0, help="Optional Taubin smooth iterations on body before base union (default 0; prefer bilateral normal filtering).")
+    parser.add_argument("--post-smooth-iters", type=int, default=0, help="Optional light Taubin smooth iterations after voxel remesh (default 0).")
+    parser.add_argument("--bilateral-iters", type=int, default=18, help="Edge-preserving bilateral normal filter iterations after remesh (0 to disable).")
+    parser.add_argument("--bilateral-sigma", type=float, default=0.45, help="Normal similarity sigma_r for edge-stopping bilateral filter.")
+    parser.add_argument("--bilateral-vert-iters", type=int, default=12, help="Vertex update iterations to fit bilateral-filtered normals.")
     parser.add_argument("--add-base", action="store_true", help="Attach a chamfered circular miniature base under the feet.")
     parser.add_argument("--base-radius-ratio", type=float, default=0.38, help="Circular base radius relative to model height.")
     parser.add_argument("--base-thickness-ratio", type=float, default=0.065, help="Circular base thickness relative to model height.")
@@ -134,6 +137,84 @@ def taubin_smooth_mesh(obj, iterations: int = 8, lam: float = 0.5, mu: float = -
             np.add.at(acc, u0, v[u1])
             np.add.at(acc, u1, v[u0])
             v = v + factor * (acc / deg - v)
+    mesh.vertices.foreach_set("co", v.ravel())
+    mesh.update()
+
+
+def bilateral_normal_denoise(obj, n_normal_iters: int = 18, sigma_r: float = 0.45, n_vert_iters: int = 12) -> None:
+    """Edge-preserving Bilateral Normal Filtering (Zheng et al. / Sun et al.) in pure vectorized NumPy.
+
+    Smooths surface grain and voxel stair-stepping across flat/curved regions while stopping cleanly
+    at sharp detail creases (bangs, hood rim, flower petals, ribbons, skirt pleats, base chamfer).
+    """
+    if n_normal_iters <= 0 or n_vert_iters <= 0:
+        return
+    mesh = obj.data
+    n_verts = len(mesh.vertices)
+    n_polys = len(mesh.polygons)
+    if n_verts == 0 or n_polys == 0:
+        return
+
+    v = np.empty(n_verts * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", v)
+    v = v.reshape(-1, 3)
+
+    f = np.empty(n_polys * 3, dtype=np.int32)
+    mesh.polygons.foreach_get("vertices", f)
+    f = f.reshape(-1, 3)
+
+    e0 = np.sort(f[:, [0, 1]], axis=1)
+    e1 = np.sort(f[:, [1, 2]], axis=1)
+    e2 = np.sort(f[:, [2, 0]], axis=1)
+    edges_all = np.vstack([e0, e1, e2])
+    face_ids = np.tile(np.arange(n_polys, dtype=np.int32), 3)
+    ekey = edges_all[:, 0].astype(np.int64) * n_verts + edges_all[:, 1].astype(np.int64)
+    order = np.argsort(ekey)
+    ekey_s = ekey[order]
+    f_s = face_ids[order]
+    same = ekey_s[:-1] == ekey_s[1:]
+    fa = f_s[:-1][same]
+    fb = f_s[1:][same]
+    adj_i = np.concatenate([fa, fb])
+    adj_j = np.concatenate([fb, fa])
+
+    v0, v1, v2 = v[f[:, 0]], v[f[:, 1]], v[f[:, 2]]
+    c = (v0 + v1 + v2) * (1.0 / 3.0)
+    cross = np.cross(v1 - v0, v2 - v0)
+    area = 0.5 * np.linalg.norm(cross, axis=1).astype(np.float32)
+    nrm = cross / np.maximum(2.0 * area[:, None], 1e-12)
+
+    dist_ij = np.linalg.norm(c[adj_i] - c[adj_j], axis=1)
+    sigma_s = max(float(dist_ij.mean()) * 1.8, 1e-6)
+    ws = np.exp(-0.5 * (dist_ij / sigma_s) ** 2).astype(np.float32) * area[adj_j]
+
+    n_filt = nrm.copy()
+    inv_2sr2 = 0.5 / max(sigma_r * sigma_r, 1e-6)
+    for _ in range(n_normal_iters):
+        dn = n_filt[adj_i] - n_filt[adj_j]
+        dn2 = (dn * dn).sum(axis=1)
+        w = ws * np.exp(-dn2 * inv_2sr2)
+        acc = np.zeros_like(n_filt)
+        np.add.at(acc, adj_i, n_filt[adj_j] * w[:, None])
+        acc += n_filt * (0.25 * area[:, None])
+        n_filt = acc / np.maximum(np.linalg.norm(acc, axis=1, keepdims=True), 1e-12)
+
+    v_deg = np.zeros(n_verts, dtype=np.float32)
+    np.add.at(v_deg, f[:, 0], 1.0)
+    np.add.at(v_deg, f[:, 1], 1.0)
+    np.add.at(v_deg, f[:, 2], 1.0)
+    v_deg = np.maximum(v_deg, 1.0)[:, None]
+
+    for _ in range(n_vert_iters):
+        c = (v[f[:, 0]] + v[f[:, 1]] + v[f[:, 2]]) * (1.0 / 3.0)
+        disp = np.zeros_like(v)
+        for k in range(3):
+            vk = f[:, k]
+            diff = c - v[vk]
+            proj = (diff * n_filt).sum(axis=1, keepdims=True) * n_filt
+            np.add.at(disp, vk, proj)
+        v = v + (disp / v_deg)
+
     mesh.vertices.foreach_set("co", v.ravel())
     mesh.update()
 
@@ -258,6 +339,13 @@ def main():
 
     counts, remaining_groups, bad_edges = cleanup_components(body)
     assert bad_edges == 0, f"Found {bad_edges} non-manifold edges after voxel union!"
+
+    bilateral_normal_denoise(
+        body,
+        n_normal_iters=args.bilateral_iters,
+        sigma_r=args.bilateral_sigma,
+        n_vert_iters=args.bilateral_vert_iters,
+    )
 
     coords = np.empty(len(body.data.vertices) * 3, dtype=np.float32)
     body.data.vertices.foreach_get("co", coords)

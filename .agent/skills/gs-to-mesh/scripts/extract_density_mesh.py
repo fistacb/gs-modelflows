@@ -190,7 +190,7 @@ def main() -> None:
     parser.add_argument("--padding", type=int, default=6, help="Voxel grid border padding.")
     parser.add_argument("--min-opacity", type=float, default=0.20, help="Drop wispy halo splats below this sigmoid opacity.")
     parser.add_argument("--min-scale", type=float, default=0.0016, help="Minimum surfel scale to close thin gaps.")
-    parser.add_argument("--smooth-sigma", type=float, default=0.90, help="Gaussian smoothing sigma before Marching Cubes.")
+    parser.add_argument("--smooth-sigma", type=float, default=0.55, help="Minimal Gaussian anti-staircase sigma before Marching Cubes.")
     parser.add_argument("--coord-preset", choices=("blender", "raw_to_blender"), default="blender", help="Coordinate transform applied to output vertices.")
     args = parser.parse_args()
 
