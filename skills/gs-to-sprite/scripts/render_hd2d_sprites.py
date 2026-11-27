@@ -28,6 +28,252 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
+SH_C0 = 0.28209479177387814
+
+
+def _read_binary_ply(path: Path) -> tuple[bytes, np.ndarray]:
+    """Minimal self-contained binary_little_endian PLY reader (preserves exact header)."""
+    raw = path.read_bytes()
+    marker = b"end_header\n"
+    idx = raw.find(marker)
+    if idx < 0:
+        marker = b"end_header\r\n"
+        idx = raw.find(marker)
+    if idx < 0:
+        raise ValueError(f"Invalid PLY header: {path}")
+    header_bytes = raw[: idx + len(marker)]
+    header_text = header_bytes.decode("ascii", errors="ignore")
+    n_verts = 0
+    fields = []
+    type_map = {
+        "float": "<f4", "float32": "<f4", "double": "<f8", "float64": "<f8",
+        "uchar": "u1", "uint8": "u1", "int": "<i4", "int32": "<i4", "short": "<i2", "ushort": "<u2",
+    }
+    in_vertex = False
+    for line in header_text.splitlines():
+        parts = line.strip().split()
+        if not parts:
+            continue
+        if parts[0] == "element":
+            in_vertex = (len(parts) >= 3 and parts[1] == "vertex")
+            if in_vertex:
+                n_verts = int(parts[2])
+        elif parts[0] == "property" and in_vertex and len(parts) >= 3:
+            fields.append((parts[2], type_map.get(parts[1], "<f4")))
+    dtype = np.dtype(fields)
+    data = np.frombuffer(raw, dtype=dtype, count=n_verts, offset=len(header_bytes)).copy()
+    return header_bytes, data
+
+
+def _write_position_encoded_ply(src_path: Path, dst_path: Path, lo: np.ndarray, span: np.ndarray) -> None:
+    """Copy a 3DGS PLY replacing f_dc_0..2 with normalized 3D coordinates (for single-pass Spark depth/normal maps)."""
+    header_bytes, data = _read_binary_ply(src_path)
+    xyz = np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float32)
+    norm_rgb = np.clip((xyz - lo[None, :]) / np.maximum(span[None, :], 1e-5), 0.0, 1.0) * 0.90 + 0.05
+    fdc = (norm_rgb - 0.5) / SH_C0
+    data["f_dc_0"] = fdc[:, 0]
+    data["f_dc_1"] = fdc[:, 1]
+    data["f_dc_2"] = fdc[:, 2]
+    # Zero out higher-order SH if present so encoded position RGB is strictly view-independent
+    for name in data.dtype.names or ():
+        if name.startswith("f_rest_"):
+            data[name] = 0.0
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    dst_path.write_bytes(header_bytes + data.tobytes())
+
+
+def extract_depth_and_normal_maps(
+    pos_path: Path,
+    rgba_full: Image.Image,
+    bbox: tuple[int, int, int, int],
+    sprite_alpha_mask: np.ndarray,
+    lo: np.ndarray,
+    span: np.ndarray,
+    center: np.ndarray,
+    half_extent: float,
+    yaw_deg: float,
+    pitch_deg: float,
+    canvas_size: int,
+    char_height_ratio: float = 0.92,
+) -> tuple[Image.Image, Image.Image]:
+    """Recover pixel-exact camera-space depth map & smooth view-space normal map aligned 1:1 with the sprite."""
+    bx0, by0, bx1, by1 = bbox
+    pos_crop = np.asarray(Image.open(pos_path).convert("RGB").crop((bx0, by0, bx1, by1)), dtype=np.float32) / 255.0
+    a_crop = np.asarray(rgba_full.crop((bx0, by0, bx1, by1)), dtype=np.float32)[:, :, 3] / 255.0
+
+    # Unpremultiply position RGB using exact alpha from black/white matting
+    valid = a_crop > 0.08
+    pos_rgb = np.zeros_like(pos_crop)
+    pos_rgb[valid] = np.clip(pos_crop[valid] / np.maximum(a_crop[valid, None], 0.08), 0.0, 1.0)
+    xyz_px = lo[None, None, :] + np.clip((pos_rgb - 0.05) / 0.90, 0.0, 1.0) * span[None, None, :]
+
+    # Camera unit direction pointing TOWARD camera (exact match to capture.js setupCameraAndRenderTarget)
+    az = math.radians(yaw_deg)
+    el = math.radians(pitch_deg)
+    cam_dir = np.array([math.sin(az) * math.cos(el), math.sin(el), math.cos(az) * math.cos(el)], dtype=np.float32)
+
+    rel = xyz_px - center[None, None, :]
+    # Closeness in [-half_extent, +half_extent] -> normalized depth in [0.05, 0.98] (bright = closer to camera)
+    closeness = np.sum(rel * cam_dir[None, None, :], axis=-1)
+    depth_norm = np.clip(0.5 + 0.46 * (closeness / max(half_extent, 1e-4)), 0.04, 0.98)
+    depth_norm = np.where(valid, depth_norm, 0.0)
+
+    # Smooth depth inside valid mask before computing view-space normal gradients (eliminates splat grain!)
+    d_im = Image.fromarray((depth_norm * 255.0).astype(np.uint8), mode="L")
+    w_im = Image.fromarray((valid.astype(np.float32) * 255.0).astype(np.uint8), mode="L")
+    d_blur = np.asarray(d_im.filter(ImageFilter.GaussianBlur(radius=2.2)), dtype=np.float32) / 255.0
+    w_blur = np.asarray(w_im.filter(ImageFilter.GaussianBlur(radius=2.2)), dtype=np.float32) / 255.0
+    d_smooth = np.where(valid, d_blur / np.maximum(w_blur, 0.15), 0.0)
+
+    # View-space normal from depth gradient (OpenGL/Unity/Godot convention: +X right, +Y up, +Z toward camera)
+    # Note: image row y increases DOWNWARD, so d(depth)/d(y_up) = -d(depth)/d(row)
+    gy, gx = np.gradient(d_smooth)
+    strength = max(float(max(bx1 - bx0, by1 - by0)) * 0.085, 14.0)
+    nx = -gx * strength
+    ny = gy * strength
+    nz = np.ones_like(nx, dtype=np.float32)
+    nlen = np.maximum(np.sqrt(nx * nx + ny * ny + nz * nz), 1e-6)
+    nx /= nlen
+    ny /= nlen
+    nz /= nlen
+    nrm_rgb = np.stack([0.5 + 0.5 * nx, 0.5 + 0.5 * ny, 0.5 + 0.5 * nz], axis=-1)
+    nrm_rgb = np.where(valid[:, :, None], nrm_rgb, np.array([0.5, 0.5, 1.0], dtype=np.float32))
+
+    # Downsample into exact same sprite canvas placement as stylize_hd2d_sprite()
+    cw, ch = bx1 - bx0, by1 - by0
+    target_h = max(16, int(round(canvas_size * char_height_ratio)))
+    scale = target_h / max(ch, 1)
+    target_w = max(8, int(round(cw * scale)))
+    if target_w > canvas_size - 4:
+        target_w = canvas_size - 4
+        target_h = max(8, int(round(ch * (target_w / max(cw, 1)))))
+    ox = (canvas_size - target_w) // 2
+    oy = canvas_size - target_h - 3
+
+    # Premultiplied downsample for depth so background 0 doesn't darken rim pixels
+    d_premul = np.dstack([d_smooth * valid.astype(np.float32), valid.astype(np.float32)])
+    d_small = np.asarray(
+        Image.fromarray((np.clip(d_premul[:, :, 0], 0, 1) * 255).astype(np.uint8), mode="L").resize((target_w, target_h), Image.Resampling.BILINEAR),
+        dtype=np.float32,
+    ) / 255.0
+    a_small = np.asarray(
+        Image.fromarray((valid.astype(np.uint8) * 255), mode="L").resize((target_w, target_h), Image.Resampling.BILINEAR),
+        dtype=np.float32,
+    ) / 255.0
+    d_unp = np.where(a_small > 0.05, np.clip(d_small / np.maximum(a_small, 0.05), 0.04, 0.99), 0.0)
+
+    n_small = np.asarray(
+        Image.fromarray((np.clip(nrm_rgb, 0, 1) * 255).astype(np.uint8), mode="RGB").resize((target_w, target_h), Image.Resampling.BILINEAR),
+        dtype=np.float32,
+    ) / 255.0
+
+    # Place onto canvas and dilate 1px into outline pixels so outline also receives valid depth/normal!
+    c_depth = np.zeros((canvas_size, canvas_size), dtype=np.float32)
+    c_nrm = np.full((canvas_size, canvas_size, 3), [0.5, 0.5, 1.0], dtype=np.float32)
+    c_has = np.zeros((canvas_size, canvas_size), dtype=bool)
+    c_depth[oy : oy + target_h, ox : ox + target_w] = d_unp
+    c_nrm[oy : oy + target_h, ox : ox + target_w] = n_small
+    c_has[oy : oy + target_h, ox : ox + target_w] = (a_small > 0.15)
+
+    # Fill 1px outline border pixels from 4-neighbors
+    need_fill = (sprite_alpha_mask > 0) & (~c_has)
+    if need_fill.any():
+        pd = np.pad(c_depth, 1, mode="edge")
+        pn = np.pad(c_nrm, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        ph = np.pad(c_has, 1, mode="constant", constant_values=False)
+        acc_d = np.zeros_like(c_depth)
+        acc_n = np.zeros_like(c_nrm)
+        cnt = np.zeros_like(c_depth)
+        for sl_y, sl_x in ((slice(0, -2), slice(1, -1)), (slice(2, None), slice(1, -1)), (slice(1, -1), slice(0, -2)), (slice(1, -1), slice(2, None))):
+            m = ph[sl_y, sl_x]
+            acc_d += np.where(m, pd[sl_y, sl_x], 0.0)
+            acc_n += np.where(m[:, :, None], pn[sl_y, sl_x], 0.0)
+            cnt += m.astype(np.float32)
+        ok = need_fill & (cnt > 0)
+        c_depth[ok] = acc_d[ok] / cnt[ok]
+        c_nrm[ok] = acc_n[ok] / cnt[ok, None]
+
+    # Renormalize normal vectors inside sprite mask
+    nv = c_nrm * 2.0 - 1.0
+    nlen2 = np.maximum(np.linalg.norm(nv, axis=-1, keepdims=True), 1e-6)
+    c_nrm = np.clip(0.5 + 0.5 * (nv / nlen2), 0.0, 1.0)
+
+    fg = sprite_alpha_mask > 0
+    d_u8 = np.where(fg, (np.clip(c_depth, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8), 0)
+    n_u8 = np.where(fg[:, :, None], (c_nrm * 255.0 + 0.5).astype(np.uint8), np.array([128, 128, 255], dtype=np.uint8))
+    a_u8 = sprite_alpha_mask.astype(np.uint8)
+
+    depth_im = Image.fromarray(np.dstack([d_u8, d_u8, d_u8, a_u8]), mode="RGBA")
+    normal_im = Image.fromarray(np.dstack([n_u8, a_u8]), mode="RGBA")
+    return depth_im, normal_im
+
+
+def build_relight_demo_gif(
+    albedo_frames: list[Image.Image],
+    depth_frames: list[Image.Image],
+    normal_frames: list[Image.Image],
+    out_path: Path,
+    duration_ms: int = 100,
+) -> None:
+    """Render a 2D real-time dynamic lantern relighting demo GIF using ONLY albedo + depth + normal maps!"""
+    sz = albedo_frames[0].size[0]
+    scale = 3 if sz <= 96 else (2 if sz <= 160 else 1)
+    n_walk = len(albedo_frames)
+    n_total = max(n_walk * 3, 24)
+    yy, xx = np.mgrid[0:sz, 0:sz].astype(np.float32)
+    u = (xx / max(sz - 1, 1)) * 2.0 - 1.0  # -1..+1 (+X right)
+    v = 1.0 - (yy / max(sz - 1, 1)) * 2.0  # -1..+1 (+Y up)
+
+    frames = []
+    for fi in range(n_total):
+        idx = fi % n_walk
+        alb = np.asarray(albedo_frames[idx].convert("RGBA"), dtype=np.float32) / 255.0
+        dep = np.asarray(depth_frames[idx].convert("RGBA"), dtype=np.float32)[:, :, 0] / 255.0
+        nrm = (np.asarray(normal_frames[idx].convert("RGBA"), dtype=np.float32)[:, :, :3] / 255.0) * 2.0 - 1.0
+        nrm /= np.maximum(np.linalg.norm(nrm, axis=-1, keepdims=True), 1e-6)
+        fg = alb[:, :, 3] > 0.5
+
+        # Orbiting warm golden lantern in 3D view-space around the sprite
+        ang = (fi / n_total) * 2.0 * math.pi
+        lx = 0.85 * math.cos(ang)
+        ly = 0.25 + 0.28 * math.sin(ang * 2.0)
+        lz = 0.55 + 0.45 * math.sin(ang)  # moves from in front (+1.0) to behind (+0.1)
+
+        # Surface 3D position in normalized view space
+        pz = (dep - 0.5) * 0.9
+        dx, dy, dz = lx - u, ly - v, lz - pz
+        dist2 = dx * dx + dy * dy + dz * dz + 0.18
+        inv_d = 1.0 / np.sqrt(dist2)
+        L_dir = np.stack([dx * inv_d, dy * inv_d, dz * inv_d], axis=-1)
+
+        ndotl = np.clip(np.sum(nrm * L_dir, axis=-1), 0.0, 1.0)
+        atten = 1.15 / (0.45 + dist2 * 1.1)
+        # Subtle rim glow when lantern moves behind the character
+        rim = (1.0 - np.clip(nrm[:, :, 2], 0.0, 1.0)) ** 2.2 * np.clip(0.8 - lz, 0.0, 1.0) * 1.4
+
+        # Cool moonlight ambient + warm golden lantern point light
+        amb = np.array([0.28, 0.34, 0.52], dtype=np.float32)
+        light_col = np.array([1.35, 0.92, 0.48], dtype=np.float32)
+        lit = alb[:, :, :3] * (amb[None, None, :] + light_col[None, None, :] * (ndotl * atten + rim)[:, :, None])
+
+        # Dark twilight backdrop + glowing lantern orb
+        bg = np.full((sz, sz, 3), [0.10, 0.12, 0.18], dtype=np.float32)
+        orb_d = np.hypot(u - lx, v - ly)
+        orb_glow = np.exp(-(orb_d / 0.16) ** 2)[:, :, None] * np.array([1.0, 0.72, 0.32], dtype=np.float32)[None, None, :]
+        orb_core = (orb_d < 0.045)[:, :, None] * np.array([1.0, 0.96, 0.80], dtype=np.float32)[None, None, :]
+
+        # Depth-sort lantern orb: if lantern is behind sprite center (lz < 0.42), draw behind sprite; else in front!
+        if lz < 0.42:
+            comp = np.where(fg[:, :, None], lit, bg + orb_glow + orb_core)
+        else:
+            comp = np.where(fg[:, :, None], lit, bg) + orb_glow * 0.45 + orb_core
+
+        im = Image.fromarray((np.clip(comp, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8), mode="RGB")
+        im_up = im.resize((sz * scale, sz * scale), Image.Resampling.NEAREST)
+        frames.append(im_up.convert("P", palette=Image.Palette.ADAPTIVE, colors=256, dither=Image.Dither.NONE))
+
+    frames[0].save(out_path, save_all=True, append_images=frames[1:], duration=duration_ms, loop=0, optimize=False)
+
 
 def default_spark_dir() -> Path:
     env_dir = os.environ.get("GS_SPARK_DIR")
@@ -323,6 +569,7 @@ def main() -> None:
     parser.add_argument("--render-res", type=int, default=512, help="Intermediate Spark GPU render resolution.")
     parser.add_argument("--no-outline", action="store_true", help="Disable 1px tinted dark outline.")
     parser.add_argument("--scene-preview", action="store_true", help="Also generate an HD-2D diorama scene preview GIF.")
+    parser.add_argument("--export-maps", action="store_true", help="Also export pixel-aligned depth & view-space normal sprite sheets + 2D relighting demo GIF.")
     parser.add_argument("--job-name", type=str, default="sprite_job", help="Temporary folder stem inside spark_demo.")
     args = parser.parse_args()
 
@@ -350,6 +597,9 @@ def main() -> None:
     render_dir = spark_dir / render_dir_name
     job_frames_dir = spark_dir / "frames" / args.job_name
     job_frames_dir.mkdir(parents=True, exist_ok=True)
+
+    pos_lo = pos_span = pos_center = None
+    pos_half_extent = 0.5
 
     if args.anim_json:
         src_anim = json.loads(args.anim_json.read_text(encoding="utf-8"))
@@ -379,14 +629,69 @@ def main() -> None:
         manifest_rel = f"frames/{args.job_name}/anim.json"
         (spark_dir / manifest_rel).write_text(json.dumps(manifest), encoding="utf-8")
         subprocess.run(["node", "capture.mjs", "anim", render_dir_name, manifest_rel], cwd=str(spark_dir), check=True)
+
+        if args.export_maps:
+            base_ply_abs = spark_dir / src_anim["basePly"]
+            _, base_data = _read_binary_ply(base_ply_abs)
+            b_xyz = np.column_stack([base_data["x"], base_data["y"], base_data["z"]]).astype(np.float32)
+            pos_lo = np.percentile(b_xyz, 0.2, axis=0) - 0.05
+            pos_hi = np.percentile(b_xyz, 99.8, axis=0) + 0.05
+            pos_span = np.maximum(pos_hi - pos_lo, 1e-3)
+            pos_center = 0.5 * (pos_lo + pos_hi)
+            # Use horizontal/depth radius (X/Z in Spark coords) so depth uses full 8-bit contrast front-to-back!
+            pos_half_extent = float(max(0.5 * max(pos_span[0], pos_span[2]) * 0.85, 0.14))
+
+            pos_base_rel = f"frames/{args.job_name}/body_pos.ply"
+            _write_position_encoded_ply(base_ply_abs, spark_dir / pos_base_rel, pos_lo, pos_span)
+            extra_pos_map = {}
+            pos_frames = []
+            for dname, yaw in directions:
+                for fi, wf in enumerate(src_frames):
+                    pos_extras = []
+                    for ep in wf.get("extraPly", []):
+                        if ep not in extra_pos_map:
+                            ep_dst = f"frames/{args.job_name}/extra_pos_{len(extra_pos_map)}.ply"
+                            _write_position_encoded_ply(spark_dir / ep, spark_dir / ep_dst, pos_lo, pos_span)
+                            extra_pos_map[ep] = ep_dst
+                        pos_extras.append(extra_pos_map[ep])
+                    pos_frames.append({
+                        "png": f"{dname}-{fi:02d}-pos.png",
+                        "camera": dict(base_cam, background="#000000", front=yaw),
+                        "yaw": yaw,
+                        "bones": wf["bones"],
+                        "extraPly": pos_extras,
+                        "extraTransforms": wf.get("extraTransforms"),
+                    })
+            pos_manifest = {
+                "basePly": pos_base_rel,
+                "skinBin": src_anim["skinBin"],
+                "numBones": src_anim["numBones"],
+                "defaultCamera": dict(base_cam, background="#000000"),
+                "frames": pos_frames,
+            }
+            pos_manifest_rel = f"frames/{args.job_name}/anim_pos.json"
+            (spark_dir / pos_manifest_rel).write_text(json.dumps(pos_manifest), encoding="utf-8")
+            subprocess.run(["node", "capture.mjs", "anim", render_dir_name, pos_manifest_rel], cwd=str(spark_dir), check=True)
     else:
         # Static PLY: stage into spark_demo/frames/<job>/static.ply and render single frame per direction
         n_frames = 1
         staged = job_frames_dir / "static.ply"
         shutil.copy2(args.ply, staged)
-        # Render via anim mode with 0 bones? Use capture.mjs draw mode per direction/bg via minimal camera.json
+        if args.export_maps:
+            _, st_data = _read_binary_ply(staged)
+            s_xyz = np.column_stack([st_data["x"], st_data["y"], st_data["z"]]).astype(np.float32)
+            pos_lo = np.percentile(s_xyz, 0.2, axis=0) - 0.05
+            pos_hi = np.percentile(s_xyz, 99.8, axis=0) + 0.05
+            pos_span = np.maximum(pos_hi - pos_lo, 1e-3)
+            pos_center = 0.5 * (pos_lo + pos_hi)
+            # Use horizontal/depth radius (X/Z in Spark coords) so depth uses full 8-bit contrast front-to-back!
+            pos_half_extent = float(max(0.5 * max(pos_span[0], pos_span[2]) * 0.85, 0.14))
+            _write_position_encoded_ply(staged, job_frames_dir / "static_pos.ply", pos_lo, pos_span)
         for dname, yaw in directions:
-            for bg_name, bg_hex in (("blk", "#000000"), ("wht", "#ffffff")):
+            passes = [("blk", "#000000", f"frames/{args.job_name}/static.ply"), ("wht", "#ffffff", f"frames/{args.job_name}/static.ply")]
+            if args.export_maps:
+                passes.append(("pos", "#000000", f"frames/{args.job_name}/static_pos.ply"))
+            for bg_name, bg_hex, ply_rel in passes:
                 cam = dict(base_cam, background=bg_hex, front=yaw)
                 cam_rel = f"frames/{args.job_name}/cam_{dname}_{bg_name}.json"
                 man_rel = f"frames/{args.job_name}/man_{dname}_{bg_name}.json"
@@ -394,7 +699,7 @@ def main() -> None:
                 (spark_dir / man_rel).write_text(json.dumps({
                     "static": [],
                     "review": [],
-                    "frames": [{"blenderFrame": 0, "ply": [f"frames/{args.job_name}/static.ply"], "png": f"{dname}-00-{bg_name}.png"}],
+                    "frames": [{"blenderFrame": 0, "ply": [ply_rel], "png": f"{dname}-00-{bg_name}.png"}],
                 }), encoding="utf-8")
                 subprocess.run(["node", "capture.mjs", "frames", render_dir_name, cam_rel, man_rel], cwd=str(spark_dir), check=True)
 
@@ -433,6 +738,54 @@ def main() -> None:
             sheet.paste(sp, (c * args.size, r * args.size))
     sheet_path = out_dir / f"spritesheet_{args.size}px.png"
     sheet.save(sheet_path)
+
+    # 1b. Optional pixel-aligned Depth & View-Space Normal maps + 2D dynamic relighting demo GIF
+    if args.export_maps and pos_lo is not None:
+        depth_sheet = Image.new("RGBA", (args.size * n_frames, args.size * len(directions)), (0, 0, 0, 0))
+        normal_sheet = Image.new("RGBA", (args.size * n_frames, args.size * len(directions)), (0, 0, 0, 0))
+        depth_by_dir: dict[str, list[Image.Image]] = {}
+        normal_by_dir: dict[str, list[Image.Image]] = {}
+        for r, (dname, yaw) in enumerate(directions):
+            d_list, n_list = [], []
+            for c, fi in enumerate(frame_order):
+                sp_alpha = np.asarray(sprites[dname][c])[:, :, 3]
+                d_im, n_im = extract_depth_and_normal_maps(
+                    render_dir / f"{dname}-{fi:02d}-pos.png",
+                    raw_by_dir[dname][c],
+                    (bx0, by0, bx1, by1),
+                    sp_alpha,
+                    pos_lo, pos_span, pos_center, pos_half_extent,
+                    yaw, args.pitch, args.size,
+                )
+                depth_sheet.paste(d_im, (c * args.size, r * args.size))
+                normal_sheet.paste(n_im, (c * args.size, r * args.size))
+                d_list.append(d_im)
+                n_list.append(n_im)
+            depth_by_dir[dname] = d_list
+            normal_by_dir[dname] = n_list
+
+        depth_sheet.save(out_dir / f"spritesheet_{args.size}px_depth.png")
+        normal_sheet.save(out_dir / f"spritesheet_{args.size}px_normal.png")
+        maps_meta = {
+            "albedo": f"spritesheet_{args.size}px.png",
+            "depth": f"spritesheet_{args.size}px_depth.png",
+            "normal": f"spritesheet_{args.size}px_normal.png",
+            "tile_size_px": args.size,
+            "num_frames": n_frames,
+            "directions": [{"name": dn, "yaw_deg": float(yw)} for dn, yw in directions],
+            "depth_convention": "linear_camera_space (255=closest, 1..254=front_to_back, alpha=0 outside)",
+            "depth_half_extent_world": round(pos_half_extent, 5),
+            "normal_convention": "view_space_opengl_yup (R=+X_right, G=+Y_up, B=+Z_camera)",
+            "pitch_deg": args.pitch,
+            "fov_deg": args.fov,
+        }
+        (out_dir / f"maps_meta_{args.size}px.json").write_text(json.dumps(maps_meta, indent=2), encoding="utf-8")
+        pdir_m = "diag" if "diag" in sprites else directions[0][0]
+        build_relight_demo_gif(
+            sprites[pdir_m], depth_by_dir[pdir_m], normal_by_dir[pdir_m],
+            out_dir / f"sprite_relight_demo_{args.size}px.gif",
+            duration_ms=duration_ms,
+        )
 
     # 2. Transparent GIFs
     primary_dir = "diag" if "diag" in sprites else directions[0][0]
