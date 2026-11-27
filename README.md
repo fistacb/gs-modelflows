@@ -40,6 +40,17 @@ Exported directly from the rigged `anim.json` with black/white dual-pass exact a
 </p>
 </details>
 
+### Real-Time 2D Lighting with Depth & Normal Maps (`--export-maps`)
+Adding `--export-maps` exports pixel-aligned **camera-space depth** and **view-space normal** sprite sheets alongside the albedo sheet — enabling real-time 2D point lights, warm rim lighting, dynamic ground shadows, and 2.5D depth sorting with background props (all shaded purely from 2D sprites!):
+
+<p align="center">
+  <img src="docs/assets/showcase/09_maps_albedo_depth_normal.png" width="760" alt="Pixel-aligned Albedo, Depth, and View-Space Normal sprite maps" />
+</p>
+
+| Campfire Relighting (8-Dir Walk, Albedo+Depth+Normal) | Lantern Exploration with 3DGS Background Props |
+| :---: | :---: |
+| <img src="docs/assets/showcase/07_campfire_relight_8dir.gif" height="230" alt="Nighttime campfire 8-direction relighting GIF" /> | <img src="docs/assets/showcase/08_chest_explore_relight.gif" height="230" alt="Lantern exploration around treasure chest with 3DGS props GIF" /> |
+
 ### Example Agent Prompts (How to Use)
 Once installed in **Antigravity**, **Claude Code**, or **Codex**, just attach a 2D character image and ask naturally:
 

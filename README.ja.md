@@ -41,6 +41,17 @@
 </p>
 </details>
 
+### 深度マップ ＆ 法線マップによる 2D リアルタイム光源（`--export-maps`）
+`--export-maps` を指定すると、通常スプライトと **1 ピクセルもズレないカメラ空間深度マップ＆ビュー空間法線マップ** を同時出力します。ゲーム側では 2D スプライト 3 枚だけで、焚き火や手持ちランタンによるリアルタイム 3D 陰影・逆光リムライト・落ち影・背景プロップとの 2.5D 前後ソートがそのまま動きます：
+
+<p align="center">
+  <img src="docs/assets/showcase/09_maps_albedo_depth_normal.png" width="760" alt="1ピクセル一致の Albedo / Depth / Normal スプライトマップ" />
+</p>
+
+| 夜の焚き火リアルタイム光源（8 方向・2D マップのみ） | ランタン探索デモ（3DGS 背景オブジェクト＋宝箱観察） |
+| :---: | :---: |
+| <img src="docs/assets/showcase/07_campfire_relight_8dir.gif" height="230" alt="夜の焚き火 8方向リアルタイム光源デモ GIF" /> | <img src="docs/assets/showcase/08_chest_explore_relight.gif" height="230" alt="ランタンで宝箱の周りを探索するデモ GIF" /> |
+
 ### エージェントへの指示例（使い方イメージ）
 **Antigravity** / **Claude Code** / **Codex** にスキルを導入した状態で、2D 画像を添付して自然言語で依頼するだけで実行できます：
 
