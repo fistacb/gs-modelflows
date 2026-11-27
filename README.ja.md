@@ -12,6 +12,50 @@
 
 ---
 
+## ショーケース：1 枚の 2D 画像 → リグ付き 3DGS → 8 方向 HD-2D スプライト
+
+**正面の 2D キャラクター画像 1 枚**から、`gs-modeling` で動的まばたき・視線・口パク＆マント破れ防止 Harmonic DQS リグ付きの 3DGS モデルを構築し、そのまま `gs-to-sprite` へ渡して多方向で絵柄が一貫した HD-2D ゲームスプライト＆透過 GIF を出力する一連の作例です。
+
+| 1. 入力（2D デザイン画 1 枚） | 2. リグ付き 3DGS（`gs-modeling`・360° 8 方向） |
+| :---: | :---: |
+| <img src="docs/assets/showcase/01_input_design.jpg" height="220" alt="入力 2D キャラクターデザイン" /> | <img src="docs/assets/showcase/02_rigged_3dgs_turntable.jpg" height="220" alt="リグ付き 3DGS 360度ターンテーブル" /> |
+
+### 表情・リグ・全身モーション QA（`gs-modeling`）
+瞬き・ウインク・視線追従・首振り ±18°・あいうえお口パク・腕上げ／手振り・歩行／走行／ジャンプを Spark GPU で約 12 秒で一括レンダリング：
+
+<p align="center">
+  <img src="docs/assets/showcase/03_qa_motion_sheet.jpg" width="760" alt="12 パネル表情・全身モーション QA シート" />
+</p>
+
+### 8 方向 HD-2D ゲームスプライト ＆ アニメーション GIF（`gs-to-sprite`）
+リグ済み `anim.json` から黒白 2 パス完全透過マッティング・暖色ダーク 1px 縁取り・統一パレット減色で直接出力（`80×80 px`・48 色・`pitch 14°` 望遠俯瞰カメラ）：
+
+| 8 方向円周てくてく歩行 GIF（HD-2D 80px・3 倍拡大） | HD-2D ジオラマ背景プレビュー（`--scene-preview`） |
+| :---: | :---: |
+| <img src="docs/assets/showcase/06_hd2d_circle_walk_8dir.gif" height="250" alt="8 方向 HD-2D 円周歩行 GIF" /> | <img src="docs/assets/showcase/05_hd2d_scene_preview_80px.gif" height="250" alt="HD-2D ジオラマ背景プレビュー GIF" /> |
+
+<details>
+<summary>8 方向 × 8 フレーム透過スプライトシート全体を見る（<code>spritesheet_80px.png</code>）</summary>
+<p align="center">
+  <img src="docs/assets/showcase/04_spritesheet_hd2d_8dir_80px.png" width="640" alt="8 方向 × 8 フレーム HD-2D スプライトシート" />
+</p>
+</details>
+
+### エージェントへの指示例（使い方イメージ）
+**Antigravity** / **Claude Code** / **Codex** にスキルを導入した状態で、2D 画像を添付して自然言語で依頼するだけで実行できます：
+
+- **1 枚の画像からリグ付き 3DGS キャラを作る（`gs-modeling`）**:
+  > *「このデザイン画から `gs-modeling` でリグ付き 3DGS キャラを作って。動的アイ・口パク・QA 動画まで確認して」*
+- **8 方向 HD-2D 歩行スプライト＆ GIF を出す（`gs-to-sprite`）**:
+  > *「`gs-to-sprite` で 8 方向の 80px・48 色の HD-2D 歩行スプライトと、`--scene-preview` 付きの GIF を作って」*
+- **画質・テイストの出し分け例**:
+  - レトロ RPG 風：`--size 64 --colors 32 --num-frames 4`
+  - クラシック HD-2D 風：`--size 80 --colors 48 --pitch 14 --fov 11 --scene-preview`
+  - 高精細 ARPG / アクション風：`--size 160 --colors 128 --pitch 0 --no-outline`
+- **今後のモーション拡張（Kimodo 等との連携）**: `v1/rig_skeleton.json` → `anim.json` → `gs-to-sprite` が疎結合に分離されているため、Kimodo などのモーション生成モデルや BVH/SMPL リターゲットを挟むだけで、攻撃・詠唱・待機・ダンス等の 8 方向 HD-2D スプライトをキャラの絵柄を崩さず自動量産できます。
+
+---
+
 ## Architecture
 
 ```text

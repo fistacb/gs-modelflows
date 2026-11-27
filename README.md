@@ -11,6 +11,50 @@ Start from a single 2D reference image, build a clean rigged 3DGS character, and
 
 ---
 
+## Showcase: Single 2D Image → Rigged 3DGS → 8-Direction HD-2D Sprites
+
+Starting from **one front-facing 2D character image**, the agent runs `gs-modeling` end-to-end to build a rigged 3DGS character with dynamic blink/gaze/lip-sync and cape-safe Harmonic DQS skinning, then hands off directly to `gs-to-sprite` to export consistent 8-direction HD-2D game sprites and animated GIFs.
+
+| 1. Input (Single 2D Image) | 2. Rigged 3DGS (`gs-modeling`, 360° 8-View) |
+| :---: | :---: |
+| <img src="docs/assets/showcase/01_input_design.jpg" height="220" alt="Input 2D character design" /> | <img src="docs/assets/showcase/02_rigged_3dgs_turntable.jpg" height="220" alt="Rigged 3DGS 360 turnaround" /> |
+
+### Facial Expressions, Rigging & Motion QA (`gs-modeling`)
+Blink, wink, binocular gaze tracking, ±18° head turn, A-I-U-E-O lip-sync, arm raise/wave, and full-body walk/run/jump rendered in ~12 seconds on Spark GPU:
+
+<p align="center">
+  <img src="docs/assets/showcase/03_qa_motion_sheet.jpg" width="760" alt="12-panel facial expression and full-body motion QA sheet" />
+</p>
+
+### 8-Direction HD-2D Game Sprites & Animated GIFs (`gs-to-sprite`)
+Exported directly from the rigged `anim.json` with black/white dual-pass exact alpha matting, warm tinted 1px pixel outlines, and unified flicker-free palettes (`80×80 px`, 48 colors, `pitch 14°` top-down telephoto camera):
+
+| 8-Direction Circular Walk (HD-2D 80px, 3×) | HD-2D Diorama Preview (`--scene-preview`) |
+| :---: | :---: |
+| <img src="docs/assets/showcase/06_hd2d_circle_walk_8dir.gif" height="250" alt="8-direction HD-2D circular walk GIF" /> | <img src="docs/assets/showcase/05_hd2d_scene_preview_80px.gif" height="250" alt="HD-2D diorama scene preview GIF" /> |
+
+<details>
+<summary>View full 8-direction × 8-frame transparent sprite sheet (<code>spritesheet_80px.png</code>)</summary>
+<p align="center">
+  <img src="docs/assets/showcase/04_spritesheet_hd2d_8dir_80px.png" width="640" alt="8-direction x 8-frame HD-2D sprite sheet" />
+</p>
+</details>
+
+### Example Agent Prompts (How to Use)
+Once installed in **Antigravity**, **Claude Code**, or **Codex**, just attach a 2D character image and ask naturally:
+
+- **Build a rigged 3DGS character (`gs-modeling`)**:
+  > *"Create a rigged 3DGS character from this image using `gs-modeling`, including dynamic eyes, lip-sync mouth, and a QA video."*
+- **Export HD-2D walking sprites (`gs-to-sprite`)**:
+  > *"Using `gs-to-sprite`, generate an 8-direction 80px HD-2D walking sprite sheet (48 colors, `pitch 14°`) with `--scene-preview` and an animated GIF."*
+- **Customize sprite style on the fly**:
+  - Retro RPG: `--size 64 --colors 32 --num-frames 4`
+  - Classic HD-2D: `--size 80 --colors 48 --pitch 14 --fov 11 --scene-preview`
+  - High-res ARPG / Action: `--size 160 --colors 128 --pitch 0 --no-outline`
+- **Future motion retargeting**: Because the pipeline cleanly separates `v1/rig_skeleton.json` → `anim.json` → `gs-to-sprite`, external motion generators (such as Kimodo or BVH/SMPL retargeting) can drive the 21-bone rig to batch-produce arbitrary 8-direction attack, spellcast, idle, or dance sprites with 100% character consistency.
+
+---
+
 ## Architecture
 
 ```text
