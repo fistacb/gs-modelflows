@@ -1,11 +1,12 @@
 ---
 name: gs-modeling
 description: >-
-  Modular local 3D Gaussian Splatting (3DGS) character asset & rigging pipeline in five stages:
-  input preprocessing, ComfyUI / TripoSplat generation with multi-seed comparison, procedural body
-  cleanup (posture, surfaces, detail), mandatory dynamic eyes/eyelids and procedural mouth, and a
-  mandatory v1 rigged package with head-turn check and a short QA video. Optional props, performance
-  videos, and handoff to gs-to-sprite / gs-to-mesh. Use when making a 3DGS .ply character from a 2D image.
+  Modular local 3D Gaussian Splatting (3DGS) asset & rigging pipeline supporting both rigged
+  characters (`mode: humanoid`, 5 stages: input prep, ComfyUI / TripoSplat multi-seed generation,
+  procedural cleanup, mandatory dynamic eyes/eyelids & mouth, mandatory v1 rigged package + QA video)
+  and static terrain/prop assets (`mode: static_prop`, Stages 1–3 + `build_static_prop.py` -> `v1_prop/`
+  with real-world scale, bottom-center pivot, and `meta.json`). Handoff to gs-to-sprite / gs-to-mesh.
+  Use when making a 3DGS .ply character or static terrain/prop from a 2D image.
 ---
 
 # 3DGS Character Asset & Rig Pipeline（5 段階）
@@ -58,7 +59,8 @@ description: >-
 | 4. 顔の調整（必須） | 顔ディテールの整理 → 動く目 → 動く口 | `04_face/head_base.ply`, `eyes/`, `mouth/` | Gate 2 | [stage4_face.md](./references/stage4_face.md) |
 | 5. リグ付け（必須） | ボーン・ウェイト・`v1/` パッケージ・首振り ±18°・短い確認動画 | `05_rig/v1/`, `check.mp4` | Gate 3・Gate 4 | [stage5_rig.md](./references/stage5_rig.md) |
 
-- **段階を飛ばさない。** 段階 4・5 はすべてのキャラで行う（静止の目・口、リグなしで終えない）。
+- **段階を飛ばさない（`mode: humanoid` の場合）。** キャラクターでは段階 4・5 を必ず行う（静止の目・口、リグなしで終えない）。
+- **テレイン・小物オブジェクト（`mode: static_prop`）**: 木・岩・宝箱・街灯・建物などの静止アセットを作る場合は、段階 4・5 をスキップし、段階 1〜3 の後に `build_static_prop.py` で実寸・底面中央ピボット・`meta.json` 付きの `v1_prop/` へ凍結する（詳細: [static_prop.md](./references/static_prop.md)）。
 - **各段階は前の段階の確定ファイルだけを読む。** 確定ファイルは上書きせず、やり直すときは影響を受ける段階から再開する。段階を終えたら `qa/stage_<n>_handoff.md` を書く（[efficiency.md](./references/efficiency.md) 4 章）。
 - **各段階の順序は「数値の検査 → QA 前セルフチェック → 独立 QA」。** 数値で落ちたら目視に進まない。数値が通っても目視で落ちることはあり、確定時の固定撮影セット（真横 90° を含む）は必ず見る。
 - **該当するキャラ条件があれば追加手順を読む**: 顔のアクセサリー / 長い髪・マント / 背面資料あり / 細密キャラ（262k 点）→ [character_conditions.md](./references/character_conditions.md)
