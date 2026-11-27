@@ -72,12 +72,19 @@
   <img src="docs/assets/showcase/12_forest_pack_32_3dgs.jpg" width="760" alt="1 枚のプロップシートから一括生成した森の 3DGS 小道具 32 点セット" />
 </p>
 
-### 立体マップフレーム × 多層 3D 歩行ウォークスルー（`gs-stage`）
-マップアートワークを **フレーム（多層 3D スパン・段差・高架・プロップ配置・光源）**・**テーマ（切石積み・石畳・苔・森の大気）**・**独立スプラット（`v1_prop/` ＋ リグ済み `v1/`）** に分離し、段差上限と頭上クリアランスを考慮した **真の 3D A\*（`(ix, iy, span_idx)`）** で経路と勾配連動歩行を生成します。1 階の高架下をくぐって奥の石段を登り、同じ `(x, y)` 座標の真上（2 階の石橋）を渡る立体交差をそのまま 3DGS 動画・2D/HD-2D ゲーム両方の床指標として扱えます：
+### 立体マップフレーム × テーマ差し替え × リアルタイム 3D ライティング（`gs-stage`）
+マップアートワークを **フレーム（多層 3D スパン・階段・高架橋・プロップ配置・光源）**・**テーマ（参考画像からの自動パレット抽出、`irregular_ruin` / `crisp_brick` / `ashlar_cut` 石積み切替、`moss_amount`、`floor_wall_contrast`）**・**独立スプラット（`v1_prop/` ＋ リグ済み `v1/`）** に分離。真の 3D A\*（`(ix, iy, span_idx)`）による高架下→石段→石橋の立体交差歩行に加え、1 枚の Position+Normal マップから **昼／夕方の 3D 平行太陽光シャドウマップ**（太陽高度による影の長さ変化・キャラの動的落ち影・橋下での日陰入り）と **夜間のリアルタイム 3D リライティング**（スラブ遮蔽付き手持ちランタン＋深度遮蔽付き 3D 移動ホタル点光源）を同一 3D フレーム上で切り替えられます：
 
-| 森と苔むした石造遺跡（2 層 3DGS・4 アングル） | 多層 3D 立体交差ウォークスルー（高架下 → 石段 → 石橋） |
-| :---: | :---: |
-| <img src="docs/assets/showcase/13_stage_ruins_4view.jpg" height="240" alt="森と苔むした石造遺跡 4 アングル 3DGS" /> | <img src="docs/assets/showcase/14_stage_3d_crossing_walk.gif" height="240" alt="hood-01 が 2 層石造遺跡の立体交差をくぐって登って上を渡る 3DGS GIF" /> |
+<p align="center">
+  <img src="docs/assets/showcase/14_stage_3d_crossing_walk.gif" width="760" alt="同一 3D フレーム 2x2 ウォークスルー比較（上段：森 朝／夜ホタル、下段：砂漠 夕方／夜ホタル）" />
+</p>
+
+<details>
+<summary>同一 2 層 3D フレームでのテーマ差し替え静止画比較（森 <code>irregular_ruin</code> vs 砂漠 <code>crisp_brick</code>）</summary>
+<p align="center">
+  <img src="docs/assets/showcase/13_stage_ruins_4view.jpg" width="760" alt="同一 2 層 3D フレームに森テーマと砂漠テーマを適用した比較" />
+</p>
+</details>
 
 ### エージェントへの指示例（使い方イメージ）
 **Antigravity** / **Claude Code** / **Codex** にスキルを導入した状態で、2D 画像を添付して自然言語で依頼するだけで実行できます：
@@ -107,6 +114,7 @@ gs-modelflows/
 ├── renderer/spark_demo/        # ヘッドレス three.js + Spark GPU SplatSkinning レンダラー
 ├── skills/                     # スキル本体（Single Source of Truth）
 │   ├── gs-modeling/
+│   ├── gs-stage/
 │   ├── gs-to-sprite/
 │   └── gs-to-mesh/
 ├── .agents/skills/             # Codex / Agent Skills 対応ホストによる自動検出用

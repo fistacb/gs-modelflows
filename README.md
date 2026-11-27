@@ -71,12 +71,19 @@ Given a single multi-object prop sheet (black, white, or transparent background)
   <img src="docs/assets/showcase/12_forest_pack_32_3dgs.jpg" width="760" alt="32 forest village 3DGS static props batch-generated from a single 2D prop sheet" />
 </p>
 
-### 3D Volumetric Map Frame × Multi-Layer Walkthrough (`gs-stage`)
-Separating **Frame** (3D multi-layer walkable spans, ramps, overpasses, prop anchors, lights), **Theme** (swappable cut-stone masonry, forest ground, moss, atmosphere), and **standalone Splat objects** (`v1_prop/` + rigged `v1/`), `gs-stage` compiles true multi-layer 3D navigation (`(ix, iy, span_idx)` with step-height & headroom limits) so rigged characters and game sprites can walk **under an overpass, climb stone stairs, and cross directly over the exact same `(x, y)` on the upper skybridge**:
+### 3D Volumetric Map Frame × Theme Swap × Real-Time 3D Lighting (`gs-stage`)
+Separating **Frame** (multi-layer 3D walkable spans, stairs, overpasses, prop anchors, lights), **Theme** (image-compiled palettes, swappable `irregular_ruin` / `crisp_brick` / `ashlar_cut` masonry, `moss_amount`, `floor_wall_contrast`), and **standalone Splat objects** (`v1_prop/` + rigged `v1/`), `gs-stage` compiles true multi-layer 3D navigation (`(ix, iy, span_idx)` with step-height & headroom limits) and applies real-time Position+Normal **3D Directional Sun Shadow Maps** (morning vs golden-hour sunset elevation, dynamic character cast shadow, bridge underpass darkening) and **Night Relighting** (slab-occluded handheld lantern + drifting 3D firefly micro-lights with depth occlusion):
 
-| 2-Story Mossy Stone Ruins & Forest (4-View 3DGS) | Multi-Layer 3D Crossing Walkthrough (Underpass → Stairs → Overpass) |
-| :---: | :---: |
-| <img src="docs/assets/showcase/13_stage_ruins_4view.jpg" height="240" alt="2-story mossy stone ruins 4-view 3DGS stage" /> | <img src="docs/assets/showcase/14_stage_3d_crossing_walk.gif" height="240" alt="hood-01 walking under stone overpass, climbing stairs, and crossing above" /> |
+<p align="center">
+  <img src="docs/assets/showcase/14_stage_3d_crossing_walk.gif" width="760" alt="2x2 same-frame 3DGS walkthrough: Forest Morning Sun & Night Fireflies vs Desert Evening Sunset & Night Fireflies" />
+</p>
+
+<details>
+<summary>View same-frame Forest Ruins (<code>irregular_ruin</code>) vs Desert Ruins (<code>crisp_brick</code>) theme swap comparison</summary>
+<p align="center">
+  <img src="docs/assets/showcase/13_stage_ruins_4view.jpg" width="760" alt="Same 2-story 3D frame rendered with Forest Ruins vs Desert Ruins theme JSON" />
+</p>
+</details>
 
 ### Example Agent Prompts (How to Use)
 Once installed in **Antigravity**, **Claude Code**, or **Codex**, just attach a 2D character image and ask naturally:
@@ -106,6 +113,7 @@ gs-modelflows/
 ├── renderer/spark_demo/        # Headless three.js + Spark GPU SplatSkinning renderer
 ├── skills/                     # Canonical skill sources (Single Source of Truth)
 │   ├── gs-modeling/
+│   ├── gs-stage/
 │   ├── gs-to-sprite/
 │   └── gs-to-mesh/
 ├── .agents/skills/             # Auto-discovered by Codex / Agent Skills hosts
