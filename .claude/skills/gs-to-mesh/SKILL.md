@@ -77,4 +77,5 @@ blender -b --python skills/gs-to-mesh/scripts/assemble_watertight_stl.py -- \
 - `components_after_cleanup == 1`（1 連結の一体モデル）
 - `min_z_mm == 0.0`（プリントベッドへ確実に接地）
 - `overall_dimensions_mm` が目標サイズと一致していること
-- 6 方向クレイ比較で主要な輪郭・ポーズ・腕や武器の接続が崩れていないこと
+- **FDM 薄肉チェック（`fdm_check`）**: `--fdm-nozzle-mm 0.4`（既定）で局所肉厚を自動計測。`pct_below_1_nozzle`（1 ノズル未満の印刷不能ヒゲ・極細トゲ）が高い場合は、`extract_density_mesh.py` に `--min-opacity 0.28 --opening 1` を指定して極細もじゃもじゃを自動除去し、必要に応じて出力サイズ拡大または `--voxel-size` を少し大きくして肉厚を確保する。
+- 6 方向／8 方向クレイ比較で主要な輪郭・ポーズ・腕や武器の接続が崩れていないこと

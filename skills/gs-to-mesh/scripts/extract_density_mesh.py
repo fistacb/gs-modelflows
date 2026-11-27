@@ -49,7 +49,7 @@ RAW_TO_BLENDER = np.array(
 )
 
 
-def fill_volume(surface: np.ndarray, radius: int, scanline_fill: bool = False) -> tuple[np.ndarray, list[int]]:
+def fill_volume(surface: np.ndarray, radius: int, scanline_fill: bool = False, opening: int = 0) -> tuple[np.ndarray, list[int]]:
     structure = ndi.generate_binary_structure(3, 1)
     closed = ndi.binary_closing(surface, structure=structure, iterations=max(1, radius)) if radius > 0 else surface.copy()
     if scanline_fill:
@@ -63,6 +63,9 @@ def fill_volume(surface: np.ndarray, radius: int, scanline_fill: bool = False) -
         # Concave-safe fill: seals enclosed interior cavities without filling concave exterior pockets
         # (e.g. hooded faces, bangs, cape interiors, or outstretched arms).
         filled = ndi.binary_fill_holes(closed)
+    if opening > 0:
+        # Shave fragile sub-nozzle wisps, sleeve spikes, and stray tendrils for FDM printing
+        filled = ndi.binary_opening(filled, structure=structure, iterations=opening)
     labels, _ = ndi.label(filled)
     counts = np.bincount(labels.ravel())
     counts[0] = 0
@@ -185,6 +188,7 @@ def main() -> None:
     parser.add_argument("--comfyui-dir", type=Path, default=Path(os.environ["GS_COMFYUI_DIR"]) if os.environ.get("GS_COMFYUI_DIR") else None)
     parser.add_argument("--threshold", type=float, default=0.30, help="Density iso-threshold.")
     parser.add_argument("--closing", type=int, default=2, help="3D 6-connected binary closing iterations.")
+    parser.add_argument("--opening", type=int, default=0, help="Optional 3D 6-connected binary opening iterations to shave fragile FDM wisps (e.g. 1).")
     parser.add_argument("--scanline-fill", action="store_true", help="Enable legacy 3-axis scanline interior fill (can fill concave pockets like hoods).")
     parser.add_argument("--grid-res", type=int, default=420, help="Voxel grid resolution along longest axis.")
     parser.add_argument("--padding", type=int, default=6, help="Voxel grid border padding.")
@@ -237,7 +241,7 @@ def main() -> None:
         field, origin, voxel = evaluate_density_fallback(positions, op_t, scales, rotations_wxyz, args.grid_res, args.padding, device)
 
     print(f"[gs-to-mesh] density ({backend}): shape={field.shape} voxel={voxel:.6f} max={float(field.max()):.4f}", flush=True)
-    solid, components = fill_volume(field > args.threshold, args.closing, scanline_fill=args.scanline_fill)
+    solid, components = fill_volume(field > args.threshold, args.closing, scanline_fill=args.scanline_fill, opening=args.opening)
     soft = ndi.gaussian_filter(solid.astype(np.float32), args.smooth_sigma)
     vertices, triangles, _, _ = marching_cubes(
         soft, 0.50, spacing=(voxel, voxel, voxel), allow_degenerate=False, gradient_direction="ascent"

@@ -17,6 +17,7 @@ from pathlib import Path
 import bmesh
 import bpy
 from mathutils import Vector
+from mathutils.bvhtree import BVHTree
 import numpy as np
 
 
@@ -46,6 +47,7 @@ def parse_cli_args():
     parser.add_argument("--base-diameter-mm", type=float, default=None, help="Scale final model so circular base diameter equals this value in mm (e.g. 25.4).")
     parser.add_argument("--target-height-mm", type=float, default=None, help="Scale final model so total Z height equals this value in mm (used if --base-diameter-mm is omitted).")
     parser.add_argument("--bottom-clip", type=float, default=0.0013, help="Flat bottom clip margin before Z=0 grounding.")
+    parser.add_argument("--fdm-nozzle-mm", type=float, default=0.4, help="FDM nozzle diameter in mm for thin-part thickness audit (0 to skip).")
     parser.add_argument("--render-qa-dir", type=Path, default=None, help="Optional directory to render 6-view clay comparison PNGs.")
     return parser.parse_args(argv)
 
@@ -219,6 +221,57 @@ def bilateral_normal_denoise(obj, n_normal_iters: int = 18, sigma_r: float = 0.4
     mesh.update()
 
 
+def check_fdm_thickness(obj, nozzle_mm: float = 0.4, n_samples: int = 12000) -> dict:
+    """Audit local wall/part thickness (mm) via inward BVHTree raycasts for FDM printability."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.verts.ensure_lookup_table()
+    bm.normal_update()
+    bvh = BVHTree.FromBMesh(bm)
+
+    n_verts = len(bm.verts)
+    step = max(1, n_verts // max(1, n_samples))
+    eps = max(0.015, nozzle_mm * 0.04)
+    thicknesses = []
+    thin_zs = []
+    for idx in range(0, n_verts, step):
+        v = bm.verts[idx]
+        n = v.normal
+        if n.length < 1e-6:
+            continue
+        origin = v.co - n * eps
+        hit_loc, _, _, dist = bvh.ray_cast(origin, -n)
+        if hit_loc is not None and dist is not None:
+            t = float(dist + eps)
+            thicknesses.append(t)
+            if t < nozzle_mm * 2.0:
+                thin_zs.append(float(v.co.z))
+    bm.free()
+
+    if not thicknesses:
+        return {"nozzle_mm": nozzle_mm, "samples": 0}
+    arr = np.asarray(thicknesses, dtype=np.float32)
+    z_max = max(float(max(thin_zs)) if thin_zs else 1.0, 1.0)
+    # Bucket thin (< 2*nozzle) hits into 4 height quarters for quick diagnosis
+    hotspots = {}
+    if thin_zs:
+        tz = np.asarray(thin_zs, dtype=np.float32)
+        for label, lo_f, hi_f in [("base_feet", 0.0, 0.25), ("legs_skirt", 0.25, 0.50), ("torso_arms", 0.50, 0.75), ("head_hair", 0.75, 1.05)]:
+            cnt = int(((tz >= lo_f * z_max) & (tz < hi_f * z_max)).sum())
+            if cnt > 0:
+                hotspots[label] = round(100.0 * cnt / len(arr), 2)
+    return {
+        "nozzle_mm": nozzle_mm,
+        "min_recommended_wall_mm": round(nozzle_mm * 2.0, 3),
+        "samples": int(len(arr)),
+        "p05_thickness_mm": round(float(np.percentile(arr, 5)), 3),
+        "median_thickness_mm": round(float(np.median(arr)), 3),
+        "pct_below_1_nozzle": round(float(100.0 * (arr < nozzle_mm).mean()), 2),
+        "pct_below_2_nozzles": round(float(100.0 * (arr < nozzle_mm * 2.0).mean()), 2),
+        "thin_area_by_height_pct": hotspots,
+    }
+
+
 def cleanup_components(obj) -> tuple[list[int], int, int]:
     bm = bmesh.new()
     bm.from_mesh(obj.data)
@@ -383,6 +436,7 @@ def main():
         bpy.ops.export_scene.gltf(filepath=str(args.out_glb), use_selection=True, export_format="GLB")
 
     dims_mm = np.ptp(scaled, axis=0).tolist()
+    fdm_check = check_fdm_thickness(body, nozzle_mm=args.fdm_nozzle_mm) if args.fdm_nozzle_mm > 0 else None
     report = {
         "faces": len(body.data.polygons),
         "vertices": len(body.data.vertices),
@@ -392,6 +446,7 @@ def main():
         "min_z_mm": float(scaled[:, 2].min()),
         "overall_dimensions_mm": [round(float(v), 3) for v in dims_mm],
         "merge_voxel_mm": round(float(args.voxel_size * factor), 4),
+        "fdm_check": fdm_check,
         "stl_file": str(args.out_stl),
         "glb_file": str(args.out_glb) if args.out_glb else None,
     }
