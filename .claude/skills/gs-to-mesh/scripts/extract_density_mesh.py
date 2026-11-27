@@ -66,16 +66,49 @@ def fill_volume(surface: np.ndarray, radius: int) -> tuple[np.ndarray, list[int]
     return (labels == counts.argmax()), sorted(counts[counts > 0].tolist(), reverse=True)[:16]
 
 
+def _quat_wxyz_to_rotmat(q: torch.Tensor) -> torch.Tensor:
+    """Convert unit quaternions (N, 4) in wxyz order to rotation matrices (N, 3, 3)."""
+    q = q / torch.clamp(torch.linalg.norm(q, dim=-1, keepdim=True), min=1e-8)
+    w, x, y, z = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    r00 = 1.0 - 2.0 * (yy + zz)
+    r01 = 2.0 * (xy - wz)
+    r02 = 2.0 * (xz + wy)
+    r10 = 2.0 * (xy + wz)
+    r11 = 1.0 - 2.0 * (xx + zz)
+    r12 = 2.0 * (yz - wx)
+    r20 = 2.0 * (xz - wy)
+    r21 = 2.0 * (yz + wx)
+    r22 = 1.0 - 2.0 * (xx + yy)
+    return torch.stack(
+        [
+            torch.stack([r00, r01, r02], dim=-1),
+            torch.stack([r10, r11, r12], dim=-1),
+            torch.stack([r20, r21, r22], dim=-1),
+        ],
+        dim=-2,
+    )
+
+
 def evaluate_density_fallback(
     positions: torch.Tensor,
     opacity: torch.Tensor,
     scales: torch.Tensor,
+    rotations_wxyz: torch.Tensor,
     grid_res: int,
     padding: int,
     device: torch.device,
-    chunk: int = 2048,
+    chunk: int = 1024,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Self-contained PyTorch isotropic-radius Gaussian density splatting fallback."""
+    """Self-contained PyTorch ANISOTROPIC oriented-ellipsoid Gaussian density splatting evaluator.
+
+    Evaluates the true 3DGS Mahalanobis distance delta^T (R diag(1/s^2) R^T) delta so flat surface
+    splats stay sleek and flush along the surface instead of ballooning into bumpy spheres!
+    """
+    import math
+
     p_min = positions.min(dim=0).values
     p_max = positions.max(dim=0).values
     extent = float((p_max - p_min).max().item())
@@ -85,10 +118,15 @@ def evaluate_density_fallback(
     shape = tuple(int(math.ceil(float((p_max[i] - p_min[i]).item()) / voxel)) + 2 * padding + 1 for i in range(3))
 
     field = torch.zeros(shape, dtype=torch.float32, device=device)
-    # Effective isotropic sigma per splat (clamped to >= 0.75 voxel for watertight coverage)
-    sigma = torch.clamp(scales.mean(dim=1), min=0.75 * voxel)
-    inv_2s2 = 0.5 / (sigma * sigma)
-    rad_vox = torch.clamp((2.5 * sigma / voxel).ceil().to(torch.int64), min=1, max=6)
+    # Clamp minimum axis gently to 0.72*voxel so razor-thin surfels are captured cleanly without spherical bloating,
+    # and cap runaway oversize splats at 4.5*voxel so stray giant splats never create huge warts.
+    scl = torch.clamp(scales, min=0.72 * voxel, max=4.5 * voxel)
+    inv_s = 1.0 / scl  # (N, 3)
+    R = _quat_wxyz_to_rotmat(rotations_wxyz)  # (N, 3, 3), columns are local principal axes
+    # Transform matrix M = diag(1/s) @ R^T -> local_scaled = M @ delta -> d2 = ||local_scaled||^2
+    M = R.transpose(1, 2) * inv_s[:, :, None]  # (N, 3, 3)
+
+    rad_vox = torch.clamp((2.2 * scl.max(dim=1).values / voxel).ceil().to(torch.int64), min=1, max=6)
     coords = (positions - origin[None, :]) / voxel
 
     n = positions.shape[0]
@@ -96,7 +134,7 @@ def evaluate_density_fallback(
         end = min(n, start + chunk)
         c_b = coords[start:end]
         op_b = opacity[start:end]
-        i2_b = inv_2s2[start:end]
+        M_b = M[start:end]  # (B, 3, 3)
         r_max = int(rad_vox[start:end].max().item())
         offs = torch.arange(-r_max, r_max + 1, device=device)
         ox, oy, oz = torch.meshgrid(offs, offs, offs, indexing="ij")
@@ -104,15 +142,17 @@ def evaluate_density_fallback(
 
         base = c_b.round().to(torch.int64)  # (B, 3)
         vox_idx = base[:, None, :] + dgrid[None, :, :].to(torch.int64)  # (B, K, 3)
-        delta = (vox_idx.to(torch.float32) - c_b[:, None, :]) * voxel
-        dist2 = (delta * delta).sum(dim=-1)
-        val = op_b[:, None] * torch.exp(-dist2 * i2_b[:, None])
+        delta = (vox_idx.to(torch.float32) - c_b[:, None, :]) * voxel  # (B, K, 3)
+        # Mahalanobis squared distance: ||M_b @ delta||^2
+        u_loc = torch.einsum("bij,bkj->bki", M_b, delta)
+        maha2 = (u_loc * u_loc).sum(dim=-1)
+        val = op_b[:, None] * torch.exp(-0.5 * maha2)
 
         valid = (
             (vox_idx[:, :, 0] >= 0) & (vox_idx[:, :, 0] < shape[0])
             & (vox_idx[:, :, 1] >= 0) & (vox_idx[:, :, 1] < shape[1])
             & (vox_idx[:, :, 2] >= 0) & (vox_idx[:, :, 2] < shape[2])
-            & (val > 1e-4)
+            & (val > 1e-3)
         )
         if valid.any():
             idx_v = vox_idx[valid]
@@ -138,13 +178,13 @@ def main() -> None:
     parser.add_argument("--out-obj", type=Path, default=None, help="Optional Wavefront .obj output path.")
     parser.add_argument("--report", type=Path, default=None, help="Optional JSON report path.")
     parser.add_argument("--comfyui-dir", type=Path, default=Path(os.environ["GS_COMFYUI_DIR"]) if os.environ.get("GS_COMFYUI_DIR") else None)
-    parser.add_argument("--threshold", type=float, default=0.33, help="Density iso-threshold.")
-    parser.add_argument("--closing", type=int, default=2, help="3D binary closing iterations.")
+    parser.add_argument("--threshold", type=float, default=0.38, help="Density iso-threshold.")
+    parser.add_argument("--closing", type=int, default=3, help="3D binary closing iterations.")
     parser.add_argument("--grid-res", type=int, default=380, help="Voxel grid resolution along longest axis.")
     parser.add_argument("--padding", type=int, default=6, help="Voxel grid border padding.")
-    parser.add_argument("--min-opacity", type=float, default=0.095, help="Drop splats below this sigmoid opacity.")
-    parser.add_argument("--min-scale", type=float, default=0.00215, help="Minimum surfel scale to close thin gaps.")
-    parser.add_argument("--smooth-sigma", type=float, default=0.62, help="Gaussian smoothing sigma before Marching Cubes.")
+    parser.add_argument("--min-opacity", type=float, default=0.22, help="Drop wispy halo splats below this sigmoid opacity.")
+    parser.add_argument("--min-scale", type=float, default=0.0018, help="Minimum surfel scale to close thin gaps.")
+    parser.add_argument("--smooth-sigma", type=float, default=1.35, help="Gaussian smoothing sigma before Marching Cubes.")
     parser.add_argument("--coord-preset", choices=("blender", "raw_to_blender"), default="blender", help="Coordinate transform applied to output vertices.")
     args = parser.parse_args()
 
@@ -155,15 +195,17 @@ def main() -> None:
 
     pos_np = np.column_stack([splats["x"], splats["y"], splats["z"]]).astype(np.float32)[kept]
     scl_np = np.maximum(np.exp(np.column_stack([splats["scale_0"], splats["scale_1"], splats["scale_2"]]).astype(np.float32)[kept]), args.min_scale)
-    rot_np = np.column_stack([splats["rot_3"], splats["rot_0"], splats["rot_1"], splats["rot_2"]]).astype(np.float32)[kept]
+    rot_wxyz_np = np.column_stack([splats["rot_0"], splats["rot_1"], splats["rot_2"], splats["rot_3"]]).astype(np.float32)[kept]
+    rot_xyzw_np = np.column_stack([splats["rot_3"], splats["rot_0"], splats["rot_1"], splats["rot_2"]]).astype(np.float32)[kept]
     op_np = opacity.astype(np.float32)[kept]
 
     positions = torch.as_tensor(pos_np, dtype=torch.float32, device=device)
     scales = torch.as_tensor(scl_np, dtype=torch.float32, device=device)
-    rotations = torch.as_tensor(rot_np, dtype=torch.float32, device=device)
+    rotations_wxyz = torch.as_tensor(rot_wxyz_np, dtype=torch.float32, device=device)
+    rotations = torch.as_tensor(rot_xyzw_np, dtype=torch.float32, device=device)
     op_t = torch.as_tensor(op_np, dtype=torch.float32, device=device)
 
-    backend = "pytorch_fallback"
+    backend = "pytorch_anisotropic"
     field = None
     origin = None
     voxel = None
@@ -183,10 +225,10 @@ def main() -> None:
             voxel = float(voxel_val)
             backend = "comfyui_splat_density"
         except Exception as exc:
-            print(f"[gs-to-mesh] ComfyUI _splat_density unavailable ({exc}); using PyTorch fallback.", flush=True)
+            print(f"[gs-to-mesh] ComfyUI _splat_density unavailable ({exc}); using PyTorch anisotropic fallback.", flush=True)
 
     if field is None:
-        field, origin, voxel = evaluate_density_fallback(positions, op_t, scales, args.grid_res, args.padding, device)
+        field, origin, voxel = evaluate_density_fallback(positions, op_t, scales, rotations_wxyz, args.grid_res, args.padding, device)
 
     print(f"[gs-to-mesh] density ({backend}): shape={field.shape} voxel={voxel:.6f} max={float(field.max()):.4f}", flush=True)
     solid, components = fill_volume(field > args.threshold, args.closing)

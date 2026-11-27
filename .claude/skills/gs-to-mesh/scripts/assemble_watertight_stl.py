@@ -35,6 +35,8 @@ def parse_cli_args():
     parser.add_argument("--out-glb", type=Path, default=None, help="Optional .glb export path.")
     parser.add_argument("--report", type=Path, default=None, help="Optional JSON validation report path.")
     parser.add_argument("--voxel-size", type=float, default=0.0032, help="Blender VOXEL remesh size in model units.")
+    parser.add_argument("--smooth-iters", type=int, default=10, help="Volume-preserving Taubin smooth iterations on body before base union (0 to disable).")
+    parser.add_argument("--post-smooth-iters", type=int, default=2, help="Light Taubin smooth iterations after voxel remesh to remove stair-stepping.")
     parser.add_argument("--add-base", action="store_true", help="Attach a chamfered circular miniature base under the feet.")
     parser.add_argument("--base-radius-ratio", type=float, default=0.38, help="Circular base radius relative to model height.")
     parser.add_argument("--base-thickness-ratio", type=float, default=0.065, help="Circular base thickness relative to model height.")
@@ -104,6 +106,36 @@ def add_circular_base(body_obj, radius_ratio: float, thickness_ratio: float):
     base_obj = bpy.context.active_object
     base_obj.name = "CircularBase"
     return base_obj
+
+
+def taubin_smooth_mesh(obj, iterations: int = 8, lam: float = 0.5, mu: float = -0.53) -> None:
+    """Volume-preserving Taubin smoothing (alternating shrink/inflate Laplacian passes)."""
+    if iterations <= 0:
+        return
+    mesh = obj.data
+    n_verts = len(mesh.vertices)
+    n_edges = len(mesh.edges)
+    if n_verts == 0 or n_edges == 0:
+        return
+    v = np.empty(n_verts * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("co", v)
+    v = v.reshape(-1, 3)
+    e = np.empty(n_edges * 2, dtype=np.int32)
+    mesh.edges.foreach_get("vertices", e)
+    e = e.reshape(-1, 2)
+    u0, u1 = e[:, 0], e[:, 1]
+    deg = np.zeros(n_verts, dtype=np.float32)
+    np.add.at(deg, u0, 1.0)
+    np.add.at(deg, u1, 1.0)
+    deg = np.maximum(deg, 1.0)[:, None]
+    for _ in range(iterations):
+        for factor in (lam, mu):
+            acc = np.zeros_like(v)
+            np.add.at(acc, u0, v[u1])
+            np.add.at(acc, u1, v[u0])
+            v = v + factor * (acc / deg - v)
+    mesh.vertices.foreach_set("co", v.ravel())
+    mesh.update()
 
 
 def cleanup_components(obj) -> tuple[list[int], int, int]:
@@ -202,6 +234,7 @@ def main():
     scene = bpy.context.scene
 
     body = load_mesh_object(args.body_npz or args.body_obj, "ExtractedBody")
+    taubin_smooth_mesh(body, iterations=args.smooth_iters)
     parts = [body]
     for i, ep in enumerate(args.extra_mesh):
         parts.append(load_mesh_object(ep, f"ExtraProp_{i}"))
@@ -220,6 +253,8 @@ def main():
     modifier.voxel_size = args.voxel_size
     modifier.adaptivity = 0.0
     bpy.ops.object.modifier_apply(modifier=modifier.name)
+
+    taubin_smooth_mesh(body, iterations=args.post_smooth_iters)
 
     counts, remaining_groups, bad_edges = cleanup_components(body)
     assert bad_edges == 0, f"Found {bad_edges} non-manifold edges after voxel union!"
