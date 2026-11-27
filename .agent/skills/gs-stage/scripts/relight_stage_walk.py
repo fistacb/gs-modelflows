@@ -67,6 +67,7 @@ def main() -> None:
     ap.add_argument("--sun-dir", default="-0.52,-0.45,0.72", help="Directional sun vector (x,y,z pointing toward sky sun).")
     ap.add_argument("--sun-shadow-strength", type=float, default=0.52, help="Shadow darkening strength (0..1).")
     ap.add_argument("--sun-shadow-tint", default="0.54,0.58,0.74", help="Cool sky-lit shadow tint RGB (0..1).")
+    ap.add_argument("--sun-warm-tint", default="0.08,0.06,0.02", help="Additive warm highlight tint on unshaded sun-facing surfaces (0..1).")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--duration-ms", type=int, default=90)
     args = ap.parse_args()
@@ -189,6 +190,7 @@ def main() -> None:
     sun_dir = np.array([float(v) for v in args.sun_dir.split(",")], dtype=np.float32)
     sun_dir /= max(float(np.linalg.norm(sun_dir)), 1e-6)
     shadow_tint = np.array([float(v) for v in args.sun_shadow_tint.split(",")], dtype=np.float32)
+    sun_warm_tint = np.array([float(v) for v in args.sun_warm_tint.split(",")], dtype=np.float32)
     static_sun_shadow = np.zeros((H, W), dtype=np.float32)
     sun_ndotl = np.ones((H, W), dtype=np.float32)
 
@@ -322,8 +324,8 @@ def main() -> None:
             sh_w = np.clip(total_sh * args.sun_shadow_strength, 0.0, 0.85)[:, :, None]
             # Cool sky-lit shadow tint on shaded stage pixels + subtle warm sunlit pop on unshaded sun-facing surfaces
             stage_sun = base_im * (1.0 - sh_w) + (base_im * shadow_tint[None, None, :]) * sh_w
-            sun_pop = np.clip(sun_ndotl - 0.35, 0.0, 1.0) * (1.0 - total_sh) * stage_only_f
-            stage_sun = np.clip(stage_sun + base_im * np.array([0.08, 0.06, 0.02], np.float32)[None, None, :] * sun_pop[:, :, None], 0.0, 1.0)
+            sun_pop = np.clip(sun_ndotl - 0.20, 0.0, 1.0) * (1.0 - total_sh) * stage_only_f
+            stage_sun = np.clip(stage_sun + base_im * sun_warm_tint[None, None, :] * sun_pop[:, :, None], 0.0, 1.0)
 
             # Also shade the character when she walks into a static stage shadow (e.g. under the skybridge!)
             char_mid = np.array([cx, cy, cz + 0.70 * sc_h], dtype=np.float32)
