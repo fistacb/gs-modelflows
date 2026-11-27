@@ -59,6 +59,11 @@ def main() -> None:
     ap.add_argument("--char-height-m", type=float, default=1.40)
     ap.add_argument("--lantern-strength", type=float, default=1.95)
     ap.add_argument("--slab-z", type=float, default=1.82, help="Vertical slab occlusion split height (m) between Layer 0 and Layer 1.")
+    ap.add_argument("--fireflies", type=int, default=0, help="Number of drifting 3D firefly micro-lights (real 3D surface lighting + depth-occluded orb).")
+    ap.add_argument("--firefly-color", default="1.0,0.86,0.42", help="RGB color for firefly micro-lights (comma-separated 0..1).")
+    ap.add_argument("--firefly-strength", type=float, default=0.85, help="3D surface illumination strength per firefly.")
+    ap.add_argument("--firefly-radius", type=float, default=1.45, help="3D lighting falloff radius (m) per firefly.")
+    ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--duration-ms", type=int, default=90)
     args = ap.parse_args()
 
@@ -155,7 +160,28 @@ def main() -> None:
         col = np.array(DEFAULT_LIGHT_COLORS.get(lt.get("kind", "soft_ivory"), [1.0, 0.78, 0.34]), dtype=np.float32)
         static_lights.append((np.array([lt["x"], lt["y"], lt.get("z", 1.2)], dtype=np.float32), col, 0.36, 0.42 + 0.07 * li, float(li) * 1.1))
 
-    # 4. Real-time 3D relighting + slab occlusion + character self-shadow + emissive bloom
+    # 3b. Procedural seamlessly-looping 3D firefly micro-lights
+    firefly_col = np.array([float(c) for c in args.firefly_color.split(",")], dtype=np.float32)
+    fireflies = []
+    if args.fireflies > 0:
+        rng = np.random.default_rng(args.seed)
+        bx0, bx1 = float(lo[0]) + 0.85, float(hi[0]) - 0.85
+        by0, by1 = float(lo[1]) + 0.85, float(hi[1]) - 0.85
+        for k in range(args.fireflies):
+            upper = (k % 2 == 1)
+            cx = float(rng.uniform(bx0, bx1))
+            cy = float(rng.uniform(by0, by1))
+            cz = float(rng.uniform(args.slab_z + 0.35, args.slab_z + 1.45)) if upper else float(rng.uniform(0.45, args.slab_z - 0.30))
+            fireflies.append({
+                "c": np.array([cx, cy, cz], dtype=np.float32),
+                "amp": np.array([float(rng.uniform(0.30, 0.70)), float(rng.uniform(0.30, 0.70)), float(rng.uniform(0.14, 0.34))], dtype=np.float32),
+                "freq": (int(rng.choice([1, 2])), int(rng.choice([1, 2])), int(rng.choice([1, 2]))),
+                "phase": (float(rng.uniform(0, 2 * math.pi)), float(rng.uniform(0, 2 * math.pi)), float(rng.uniform(0, 2 * math.pi))),
+                "pfreq": int(rng.choice([1, 2, 3])),
+                "pphase": float(rng.uniform(0, 2 * math.pi)),
+            })
+
+    # 4. Real-time 3D relighting + slab occlusion + character self-shadow + fireflies + emissive bloom
     out_frs = []
     lan_col = np.array([1.35, 0.86, 0.34], dtype=np.float32)
     px_z = xyz_s[:, :, 2]
@@ -173,31 +199,56 @@ def main() -> None:
         stage_only_f = fg_f * (~is_char).astype(np.float32)
         back_factor = float(np.clip(-float(np.dot(char_fwd, cam_dir_b)), 0.0, 1.0))
 
-        lv = lw[None, None, :] - xyz_s
-        d3 = np.linalg.norm(lv, axis=-1)
-        ld = lv / np.maximum(d3[:, :, None], 1e-4)
-        nd = np.clip(np.sum(nrm * ld, axis=-1), 0.0, 1.0)
-        wrap = 0.28 + 0.72 * nd
+        relight_add = np.zeros_like(base_im)
+        slab_vis = np.ones((H, W), dtype=np.float32)
+        if args.lantern_strength > 1e-4:
+            lv = lw[None, None, :] - xyz_s
+            d3 = np.linalg.norm(lv, axis=-1)
+            ld = lv / np.maximum(d3[:, :, None], 1e-4)
+            nd = np.clip(np.sum(nrm * ld, axis=-1), 0.0, 1.0)
+            wrap = 0.28 + 0.72 * nd
 
-        # Multi-layer slab occlusion
-        if lw[2] < args.slab_z - 0.15:
-            slab_vis = np.clip((args.slab_z - px_z) / 0.24, 0.0, 1.0)
-        elif lw[2] > args.slab_z + 0.12:
-            slab_vis = np.clip((px_z - (args.slab_z - 0.85)) / 0.65, 0.10, 1.0)
-        else:
-            slab_vis = np.ones((H, W), dtype=np.float32)
+            # Multi-layer slab occlusion
+            if lw[2] < args.slab_z - 0.15:
+                slab_vis = np.clip((args.slab_z - px_z) / 0.24, 0.0, 1.0)
+            elif lw[2] > args.slab_z + 0.12:
+                slab_vis = np.clip((px_z - (args.slab_z - 0.85)) / 0.65, 0.10, 1.0)
 
-        atten = (args.lantern_strength * pulse) * np.exp(-(d3 / 2.25) ** 2) / (0.42 + d3 * d3 * 0.85) * slab_vis
-        relight_add = base_im * lan_col[None, None, :] * (wrap * atten * stage_only_f)[:, :, None] * 1.15
+            atten = (args.lantern_strength * pulse) * np.exp(-(d3 / 2.25) ** 2) / (0.42 + d3 * d3 * 0.85) * slab_vis
+            relight_add += base_im * lan_col[None, None, :] * (wrap * atten * stage_only_f)[:, :, None] * 1.15
 
         for sp_w, sc_rgb, _, sf, sph in static_lights:
             flk = 0.14 * math.sin(fi * sf + sph)
             d_s = np.linalg.norm(sp_w[None, None, :] - xyz_s, axis=-1)
             relight_add += base_im * sc_rgb[None, None, :] * (np.exp(-(d_s / 1.55) ** 2) * flk * stage_only_f)[:, :, None]
 
+        # Dynamic 3D firefly micro-lights (real localized 3D surface illumination + slab occlusion)
+        theta = 2.0 * math.pi * (fi / max(n_frs, 1))
+        ff_frame = []
+        for ff in fireflies:
+            fx_w = ff["c"][0] + ff["amp"][0] * math.sin(ff["freq"][0] * theta + ff["phase"][0])
+            fy_w = ff["c"][1] + ff["amp"][1] * math.cos(ff["freq"][1] * theta + ff["phase"][1])
+            fz_w = ff["c"][2] + ff["amp"][2] * math.sin(ff["freq"][2] * theta + ff["phase"][2])
+            fw = np.array([fx_w, fy_w, fz_w], dtype=np.float32)
+            glow = 0.28 + 0.72 * ((0.5 + 0.5 * math.sin(ff["pfreq"] * theta + ff["pphase"])) ** 1.6)
+            ff_frame.append((fw, glow))
+            if args.firefly_strength > 1e-4:
+                fv = fw[None, None, :] - xyz_s
+                df = np.linalg.norm(fv, axis=-1)
+                fd = fv / np.maximum(df[:, :, None], 1e-4)
+                ndf = 0.35 + 0.65 * np.clip(np.sum(nrm * fd, axis=-1), 0.0, 1.0)
+                if fw[2] < args.slab_z - 0.12:
+                    f_slab = np.clip((args.slab_z - px_z) / 0.24, 0.0, 1.0)
+                elif fw[2] > args.slab_z + 0.12:
+                    f_slab = np.clip((px_z - (args.slab_z - 0.75)) / 0.55, 0.12, 1.0)
+                else:
+                    f_slab = 1.0
+                f_att = (args.firefly_strength * glow) * np.exp(-(df / args.firefly_radius) ** 2) / (0.35 + df * df * 1.2) * f_slab
+                relight_add += base_im * firefly_col[None, None, :] * (ndf * f_att * stage_only_f)[:, :, None]
+
         # Character back-facing self-shadow
         char_shaded = base_im
-        if back_factor > 0.05:
+        if args.lantern_strength > 1e-4 and back_factor > 0.05:
             cool_back = np.array([0.52, 0.62, 0.84], dtype=np.float32)
             char_shaded = np.where(
                 is_char[:, :, None],
@@ -220,16 +271,31 @@ def main() -> None:
                 + np.exp(-(rs / 46.0) ** 2)[:, :, None] * sc_rgb[None, None, :] * (sg * 0.30 * flk_m)
             )
 
-        u_l, v_l = proj_2d(lw)
-        iu, iv = int(np.clip(round(u_l), 0, W - 1)), int(np.clip(round(v_l), 0, H - 1))
-        d_lan_cam = float(np.linalg.norm(lw - cam_b))
-        d_surf_cam = float(np.linalg.norm(xyz_s[iv, iu] - cam_b)) if fg[iv, iu] else 999.0
-        if d_surf_cam >= d_lan_cam - 0.25 and back_factor <= 0.35:
-            rl = np.hypot(xx - u_l, yy - v_l)
-            halo += (
-                np.exp(-(rl / 12.0) ** 2)[:, :, None] * np.array([0.42, 0.30, 0.12], np.float32) * pulse * slab_vis[:, :, None]
-                + np.exp(-(rl / 46.0) ** 2)[:, :, None] * np.array([0.18, 0.11, 0.04], np.float32) * pulse * slab_vis[:, :, None]
-            )
+        if args.lantern_strength > 1e-4:
+            u_l, v_l = proj_2d(lw)
+            iu, iv = int(np.clip(round(u_l), 0, W - 1)), int(np.clip(round(v_l), 0, H - 1))
+            d_lan_cam = float(np.linalg.norm(lw - cam_b))
+            d_surf_cam = float(np.linalg.norm(xyz_s[iv, iu] - cam_b)) if fg[iv, iu] else 999.0
+            if d_surf_cam >= d_lan_cam - 0.25 and back_factor <= 0.35:
+                rl = np.hypot(xx - u_l, yy - v_l)
+                halo += (
+                    np.exp(-(rl / 12.0) ** 2)[:, :, None] * np.array([0.42, 0.30, 0.12], np.float32) * pulse * slab_vis[:, :, None]
+                    + np.exp(-(rl / 46.0) ** 2)[:, :, None] * np.array([0.18, 0.11, 0.04], np.float32) * pulse * slab_vis[:, :, None]
+                )
+
+        # Depth-occluded firefly orbs (properly pass behind sandstone walls & arches!)
+        for fw, glow in ff_frame:
+            u_f, v_f = proj_2d(fw)
+            if -20 <= u_f < W + 20 and -20 <= v_f < H + 20:
+                iuf, ivf = int(np.clip(round(u_f), 0, W - 1)), int(np.clip(round(v_f), 0, H - 1))
+                d_ff_cam = float(np.linalg.norm(fw - cam_b))
+                d_s_cam = float(np.linalg.norm(xyz_s[ivf, iuf] - cam_b)) if fg[ivf, iuf] else 999.0
+                if d_s_cam >= d_ff_cam - 0.18:
+                    rf = np.hypot(xx - u_f, yy - v_f)
+                    halo += (
+                        np.exp(-(rf / 2.4) ** 2)[:, :, None] * np.array([1.0, 0.98, 0.88], np.float32) * (0.95 * glow)
+                        + np.exp(-(rf / 10.5) ** 2)[:, :, None] * firefly_col[None, None, :] * (0.42 * glow)
+                    )
 
         comp = lit + em_bloom + halo
         comp = np.clip(comp / (1.0 + 0.22 * np.maximum(comp - 0.82, 0.0)), 0.0, 1.0)
