@@ -25,16 +25,20 @@ from harmonic_dqs import build_fk_hierarchy, compute_fk_transforms, euler_xyz
 
 GAIT_PRESETS: dict[str, dict[str, Any]] = {
     "walk": {
-        "duty_factor": 0.70,
+        "duty_factor": 0.66,
         "phases": {"hind_L": 0.00, "front_L": 0.25, "hind_R": 0.50, "front_R": 0.75},
-        "stride_frac": 0.34,      # fraction of leg length
-        "step_height_frac": 0.16,
-        "body_bob_frac": 0.032,
-        "lateral_sway_frac": 0.028,
-        "spine_pitch_deg": 2.5,
-        "spine_yaw_deg": 5.5,
-        "body_roll_deg": 3.0,
+        "stride_frac": 0.36,      # fraction of leg length
+        "step_height_frac": 0.18,
+        "body_bob_frac": 0.036,
+        "lateral_sway_frac": 0.030,
+        "spine_pitch_deg": 3.0,
+        "spine_yaw_deg": 6.5,
+        "body_roll_deg": 3.5,
         "suspension_frac": 0.0,
+        "neck_forward_deg": 8.0,
+        "tail_lift_deg": 18.0,
+        "tail_sway_deg": 12.0,
+        "ear_sweep_deg": 4.0,
     },
     "trot": {
         "duty_factor": 0.50,
@@ -44,21 +48,29 @@ GAIT_PRESETS: dict[str, dict[str, Any]] = {
         "body_bob_frac": 0.055,
         "lateral_sway_frac": 0.015,
         "spine_pitch_deg": 4.5,
-        "spine_yaw_deg": 3.5,
-        "body_roll_deg": 2.0,
-        "suspension_frac": 0.02,
+        "spine_yaw_deg": 4.5,
+        "body_roll_deg": 2.2,
+        "suspension_frac": 0.025,
+        "neck_forward_deg": 14.0,
+        "tail_lift_deg": 24.0,
+        "tail_sway_deg": 10.0,
+        "ear_sweep_deg": 8.0,
     },
     "gallop": {
         "duty_factor": 0.36,
         "phases": {"hind_L": 0.00, "hind_R": 0.18, "front_L": 0.52, "front_R": 0.72},
-        "stride_frac": 0.66,
-        "step_height_frac": 0.32,
-        "body_bob_frac": 0.065,
+        "stride_frac": 0.64,
+        "step_height_frac": 0.30,
+        "body_bob_frac": 0.068,
         "lateral_sway_frac": 0.012,
-        "spine_pitch_deg": 11.0,
-        "spine_yaw_deg": 2.5,
+        "spine_pitch_deg": 12.5,
+        "spine_yaw_deg": 3.0,
         "body_roll_deg": 2.5,
-        "suspension_frac": 0.12,
+        "suspension_frac": 0.13,
+        "neck_forward_deg": 22.0,
+        "tail_lift_deg": 28.0,
+        "tail_sway_deg": 6.0,
+        "ear_sweep_deg": 14.0,
     },
 }
 
@@ -236,15 +248,33 @@ def quadruped_gait_frame(
     if "chest" in bones:
         rots["chest"] = euler_xyz(rx_deg=chest_pitch, ry_deg=-0.5 * body_roll, rz_deg=0.45 * spine_yaw)
 
-    # Head spatial stabilization: counter-rotate neck & head by ~70% of cumulative torso motion
+    # Head spatial stabilization + canine/fox forward neck reach (neck lowers forward, head stays level on horizon)
     cum_pitch = pelvis_pitch + spine_pitch + chest_pitch
     cum_yaw = 0.55 * spine_yaw
+    neck_fwd = float(cfg.get("neck_forward_deg", 10.0))
     if "neck" in bones:
-        neck_lean = 6.0 if gait == "gallop" else 0.0
-        rots["neck"] = euler_xyz(rx_deg=neck_lean - 0.45 * cum_pitch, rz_deg=-0.45 * cum_yaw)
+        rots["neck"] = euler_xyz(rx_deg=neck_fwd - 0.50 * cum_pitch, rz_deg=-0.45 * cum_yaw)
     if "head" in bones:
-        head_level = -5.0 if gait == "gallop" else 0.0
-        rots["head"] = euler_xyz(rx_deg=head_level - 0.35 * cum_pitch, rz_deg=-0.35 * cum_yaw)
+        rots["head"] = euler_xyz(rx_deg=-0.82 * neck_fwd - 0.35 * cum_pitch, rz_deg=-0.35 * cum_yaw)
+
+    # Canine/fox ear sweep-back during brisk trot/gallop
+    ear_sweep = float(cfg.get("ear_sweep_deg", 0.0))
+    if ear_sweep > 0.0:
+        for s, sgn in (("L", +1.0), ("R", -1.0)):
+            if f"ear_{s}_1" in bones:
+                rots[f"ear_{s}_1"] = euler_xyz(rx_deg=-ear_sweep, ry_deg=sgn * (ear_sweep * 0.35))
+
+    # Active canine/fox tail counterbalance: lifts tail clear of hind legs + graceful phase-lagged wag!
+    # In right-handed Z-up (+X left, -Y forward): for a +Y-pointing tail, z' = +y*sin(rx), so Rx(+) lifts UP!
+    tail_lift = float(cfg.get("tail_lift_deg", 18.0))
+    tail_sway = float(cfg.get("tail_sway_deg", 10.0))
+    if "tail_1" in bones:
+        tail_pump = 5.5 * math.cos(ph_rad) if gait == "gallop" else 2.5 * math.sin(2.0 * ph_rad)
+        rots["tail_1"] = euler_xyz(rx_deg=+(tail_lift + tail_pump), rz_deg=tail_sway * math.sin(ph_rad - 0.5))
+    if "tail_2" in bones:
+        rots["tail_2"] = euler_xyz(rx_deg=+0.35 * tail_lift, rz_deg=tail_sway * 0.8 * math.sin(ph_rad - 1.1))
+    if "tail_3" in bones:
+        rots["tail_3"] = euler_xyz(rx_deg=-0.15 * tail_lift, rz_deg=tail_sway * 0.6 * math.sin(ph_rad - 1.7))
 
     root_shift = np.array([x_sway, 0.0, z_bob], dtype=np.float32)
 
@@ -376,22 +406,31 @@ def avian_wingbeat_frame(
         rots["spine_mid"] = euler_xyz(rx_deg=0.4 * body_pitch)
     if "chest" in bones:
         rots["chest"] = euler_xyz(rx_deg=0.6 * body_pitch)
-    # Head stabilization during flight
+    # Head stabilization & streamlined forward canine gaze during flight
     if "neck" in bones:
-        rots["neck"] = euler_xyz(rx_deg=8.0 - 0.7 * body_pitch)
+        rots["neck"] = euler_xyz(rx_deg=16.0 - 0.7 * body_pitch)
     if "head" in bones:
-        rots["head"] = euler_xyz(rx_deg=-6.0 - 0.3 * body_pitch)
+        rots["head"] = euler_xyz(rx_deg=-13.0 - 0.3 * body_pitch)
 
-    # Streamlined flight leg tuck (gentle breathing sway synced to wingbeat)
+    # Lift & trail tail cleanly above tucked hind legs during flight (Rx(+) lifts +Y tail UP!)
+    if "tail_1" in bones:
+        rots["tail_1"] = euler_xyz(rx_deg=+(26.0 + 4.0 * recoil), rz_deg=4.0 * math.sin(theta0))
+    if "tail_2" in bones:
+        rots["tail_2"] = euler_xyz(rx_deg=+8.0, rz_deg=4.0 * math.sin(theta0 - 0.6))
+    for s, sgn in (("L", +1.0), ("R", -1.0)):
+        if f"ear_{s}_1" in bones:
+            rots[f"ear_{s}_1"] = euler_xyz(rx_deg=-12.0, ry_deg=sgn * 4.0)
+
+    # Streamlined flight leg tuck (gentle breathing sway synced to wingbeat; hind legs stay below lifted tail)
     if "front_upper_L" in bones and "hind_upper_L" in bones:
         leg_sway = 4.0 * recoil
         for s in ("L", "R"):
             rots[f"front_upper_{s}"] = euler_xyz(rx_deg=24.0 + leg_sway)
             rots[f"front_lower_{s}"] = euler_xyz(rx_deg=-44.0)
             rots[f"front_paw_{s}"] = euler_xyz(rx_deg=18.0)
-            rots[f"hind_upper_{s}"] = euler_xyz(rx_deg=30.0 + leg_sway)
-            rots[f"hind_lower_{s}"] = euler_xyz(rx_deg=16.0)
-            rots[f"hind_paw_{s}"] = euler_xyz(rx_deg=22.0)
+            rots[f"hind_upper_{s}"] = euler_xyz(rx_deg=22.0 + leg_sway)
+            rots[f"hind_lower_{s}"] = euler_xyz(rx_deg=14.0)
+            rots[f"hind_paw_{s}"] = euler_xyz(rx_deg=18.0)
 
     root_shift = np.array([0.0, 0.0, hover_z], dtype=np.float32)
     return rots, root_shift

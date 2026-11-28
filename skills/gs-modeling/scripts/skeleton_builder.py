@@ -694,7 +694,7 @@ def add_tail_bones(
         role="tail",
         influence_radius_scale=1.35,
         region_box=tail_rbox,
-        limits_deg={"x": [-22, 22], "y": [-18, 18], "z": [-28, 28]},
+        limits_deg={"x": [-12, 38], "y": [-18, 18], "z": [-28, 28]},
         dynamics=dyn,
         dynamics_tip_boost=1.25,
     )
