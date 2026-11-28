@@ -219,6 +219,135 @@ def build_wing_showcase(bones: dict, fps: int = 12):
     return frames
 
 
+def build_animal_locomotion(bones: dict, fps: int = 12):
+    """Dedicated 3-part animal motion test: 1. WALK -> 2. RUN (Gallop) -> 3. FLY (Winged Flight)."""
+    has_wings = any(b.startswith(("wing_L_", "wing_R_")) for b in bones)
+    has_quad = "front_upper_L" in bones and "hind_upper_L" in bones
+    frames = []
+
+    # 1. WALK (24 frames, gentle 4-beat quadruped walk, wings softly tucked)
+    for i in range(24):
+        t = i / 24.0
+        ph = 2.0 * math.pi * t * 2.0
+        rots = {}
+        if has_quad:
+            # 4-beat lateral walk phases: HL(0), FL(pi/2), HR(pi), FR(3pi/2)
+            for b_u, b_l, b_p, p_off, knee_sgn in (
+                ("hind_upper_L", "hind_lower_L", "hind_paw_L", 0.0, +1.0),
+                ("front_upper_L", "front_lower_L", "front_paw_L", 0.5 * math.pi, -1.0),
+                ("hind_upper_R", "hind_lower_R", "hind_paw_R", math.pi, +1.0),
+                ("front_upper_R", "front_lower_R", "front_paw_R", 1.5 * math.pi, -1.0),
+            ):
+                p = ph + p_off
+                rots[b_u] = euler_xyz(rx_deg=14.0 * math.sin(p))
+                rots[b_l] = euler_xyz(rx_deg=knee_sgn * 18.0 * max(0.0, math.cos(p)))
+                rots[b_p] = euler_xyz(rx_deg=-8.0 * math.sin(p))
+        if "spine_mid" in bones:
+            rots["spine_mid"] = euler_xyz(rx_deg=2.5 * math.sin(2 * ph), rz_deg=5.0 * math.sin(ph))
+        if "neck" in bones:
+            rots["neck"] = euler_xyz(rx_deg=-3.0 * math.sin(2 * ph), rz_deg=-4.0 * math.sin(ph))
+        if "head" in bones:
+            rots["head"] = euler_xyz(rx_deg=2.5 * math.sin(2 * ph))
+        if has_wings:
+            for s, sgn in (("L", +1.0), ("R", -1.0)):
+                if f"wing_{s}_1" in bones:
+                    rots[f"wing_{s}_1"] = euler_xyz(ry_deg=sgn * (-8.0 + 3.0 * math.sin(ph)), rz_deg=sgn * 10.0)
+                if f"wing_{s}_2" in bones:
+                    rots[f"wing_{s}_2"] = euler_xyz(rz_deg=sgn * 8.0)
+        shift = np.array([0.0, 0.0, 0.012 * abs(math.sin(ph))], dtype=np.float32)
+        wind = np.array([0.0, 0.7, 0.0], dtype=np.float32)
+        frames.append(("1. WALK (QUADRUPED)", -55.0, 10.0, rots, shift, wind))
+
+    # 2. RUN / GALLOP (24 frames, energetic bounding gallop with spine flexion & trailing wings)
+    for i in range(24):
+        t = i / 24.0
+        ph = 2.0 * math.pi * t * 2.5
+        rots = {}
+        if has_quad:
+            # Asymmetric gallop: front pair slightly offset, hind pair opposite phase
+            for s, lag in (("L", 0.0), ("R", 0.35)):
+                pf = ph + lag
+                phind = ph + math.pi + lag
+                rots[f"front_upper_{s}"] = euler_xyz(rx_deg=28.0 * math.sin(pf) - 6.0)
+                rots[f"front_lower_{s}"] = euler_xyz(rx_deg=-36.0 * max(0.0, -math.cos(pf)))
+                rots[f"front_paw_{s}"] = euler_xyz(rx_deg=14.0 * math.sin(pf))
+                rots[f"hind_upper_{s}"] = euler_xyz(rx_deg=26.0 * math.sin(phind) + 6.0)
+                rots[f"hind_lower_{s}"] = euler_xyz(rx_deg=34.0 * max(0.0, math.cos(phind)))
+                rots[f"hind_paw_{s}"] = euler_xyz(rx_deg=-14.0 * math.sin(phind))
+        if "pelvis" in bones:
+            rots["pelvis"] = euler_xyz(rx_deg=9.0 * math.cos(ph))
+        if "spine_mid" in bones:
+            rots["spine_mid"] = euler_xyz(rx_deg=-10.0 * math.cos(ph))
+        if "chest" in bones:
+            rots["chest"] = euler_xyz(rx_deg=-6.0 * math.cos(ph))
+        if "neck" in bones:
+            rots["neck"] = euler_xyz(rx_deg=10.0 + 5.0 * math.cos(ph))
+        if "head" in bones:
+            rots["head"] = euler_xyz(rx_deg=-8.0 - 4.0 * math.cos(ph))
+        if has_wings:
+            for s, sgn in (("L", +1.0), ("R", -1.0)):
+                if f"wing_{s}_1" in bones:
+                    rots[f"wing_{s}_1"] = euler_xyz(ry_deg=sgn * (6.0 * math.sin(ph)), rz_deg=sgn * 16.0)
+                if f"wing_{s}_2" in bones:
+                    rots[f"wing_{s}_2"] = euler_xyz(rz_deg=sgn * 12.0)
+        air = 0.055 * max(0.0, math.sin(ph))
+        shift = np.array([0.0, 0.0, air], dtype=np.float32)
+        wind = np.array([0.0, 2.2, 0.0], dtype=np.float32)
+        frames.append(("2. RUN (GALLOP)", -62.0, 10.0, rots, shift, wind))
+
+    # 3. FLY (36 frames, airborne soaring + full articulated bilateral wingbeats + tucked flight legs)
+    for i in range(36):
+        t = i / 36.0
+        ph = 2.0 * math.pi * t * 2.0
+        upstroke = max(0.0, math.sin(ph))
+        downstroke = max(0.0, -math.sin(ph))
+        rots = {}
+        if has_wings:
+            for s, sgn in (("L", +1.0), ("R", -1.0)):
+                if f"wing_{s}_1" in bones:
+                    rots[f"wing_{s}_1"] = euler_xyz(
+                        rx_deg=10.0 * downstroke,
+                        ry_deg=sgn * (36.0 * math.sin(ph)),
+                        rz_deg=sgn * (-10.0 * downstroke + 8.0 * upstroke),
+                    )
+                if f"wing_{s}_2" in bones:
+                    rots[f"wing_{s}_2"] = euler_xyz(
+                        ry_deg=sgn * (-18.0 * upstroke + 8.0 * downstroke),
+                        rz_deg=sgn * (18.0 * upstroke),
+                    )
+                if f"wing_{s}_3" in bones:
+                    rots[f"wing_{s}_3"] = euler_xyz(
+                        rx_deg=-18.0 * upstroke,
+                        ry_deg=sgn * (-10.0 * upstroke),
+                    )
+        if has_quad:
+            # Aerodynamic flight leg pose: front legs tucked, hind legs trailed gracefully backward
+            for s in ("L", "R"):
+                rots[f"front_upper_{s}"] = euler_xyz(rx_deg=24.0 + 4.0 * math.cos(ph))
+                rots[f"front_lower_{s}"] = euler_xyz(rx_deg=-42.0)
+                rots[f"front_paw_{s}"] = euler_xyz(rx_deg=18.0)
+                rots[f"hind_upper_{s}"] = euler_xyz(rx_deg=32.0 + 5.0 * math.cos(ph))
+                rots[f"hind_lower_{s}"] = euler_xyz(rx_deg=18.0)
+                rots[f"hind_paw_{s}"] = euler_xyz(rx_deg=22.0)
+        if "pelvis" in bones:
+            rots["pelvis"] = euler_xyz(rx_deg=-8.0 + 4.0 * math.cos(ph))
+        if "chest" in bones:
+            rots["chest"] = euler_xyz(rx_deg=6.0 * math.cos(ph))
+        if "neck" in bones:
+            rots["neck"] = euler_xyz(rx_deg=10.0 - 4.0 * math.cos(ph))
+        if "head" in bones:
+            rots["head"] = euler_xyz(rx_deg=-6.0)
+        # Hovering lift synchronized with wingbeat downstroke
+        hover_z = 0.14 + 0.045 * (0.5 - 0.5 * math.cos(ph))
+        shift = np.array([0.0, 0.0, hover_z], dtype=np.float32)
+        wind = np.array([0.0, 2.0, -0.5 * downstroke], dtype=np.float32)
+        # Gently orbit camera from front-3/4 to rear-3/4 during flight so both wings are clearly visible!
+        yaw = -35.0 - 95.0 * (0.5 - 0.5 * math.cos(math.pi * t))
+        frames.append(("3. FLY (WINGED FLIGHT)", yaw, 12.0, rots, shift, wind))
+
+    return frames
+
+
 def main():
     ap = argparse.ArgumentParser(description="Render modular v2.1 skeleton QA video via Spark GPU SplatSkinning.")
     ap.add_argument("--ply", required=True)
@@ -226,7 +355,7 @@ def main():
     ap.add_argument("--spark-dir", required=True)
     ap.add_argument("--out-mp4", required=True)
     ap.add_argument("--out-sheet", default=None)
-    ap.add_argument("--mode", choices=("standard", "wing_showcase"), default="standard")
+    ap.add_argument("--mode", choices=("standard", "wing_showcase", "animal_locomotion"), default="standard")
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--fps", type=int, default=12)
     args = ap.parse_args()
@@ -261,7 +390,12 @@ def main():
     packed.tofile(skin_bin)
 
     # Simulate choreography + secondary motion
-    choreo = build_wing_showcase(bones, fps=args.fps) if args.mode == "wing_showcase" else build_choreography(bones, archetype, fps=args.fps)
+    if args.mode == "wing_showcase":
+        choreo = build_wing_showcase(bones, fps=args.fps)
+    elif args.mode == "animal_locomotion":
+        choreo = build_animal_locomotion(bones, fps=args.fps)
+    else:
+        choreo = build_choreography(bones, archetype, fps=args.fps)
     solver = SecondaryMotionSolver(bones, order)
     rots_in = [c[3] for c in choreo]
     shifts_in = [c[4] for c in choreo]

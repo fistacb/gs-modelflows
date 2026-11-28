@@ -10,7 +10,7 @@
 | `shared/secondary_motion.py` | `SecondaryMotionSolver`: bone-length-normalized spring-damper physics with material presets (`ear`/`tail`/`cape`/`hair`/`ribbon`) and lateral cloth-sheet coupling |
 | `shared/skeleton_builder.py` | Hybrid (auto-detect + recipe/override) compiler for `humanoid`, `quadruped`, `custom` archetypes and composable attachments |
 | `skills/gs-modeling/scripts/build_modular_rig.py` | CLI to build/extend `rig_skeleton.json` from a PLY + recipe JSON and verify Harmonic weights |
-| `skills/gs-modeling/scripts/render_modular_qa_video.py` | Archetype-agnostic Spark GPU QA video & 3x3 contact sheet generator (`--mode standard \| wing_showcase`) |
+| `skills/gs-modeling/scripts/render_modular_qa_video.py` | Archetype-agnostic Spark GPU QA video & 3x3 contact sheet generator (`--mode standard \| wing_showcase \| animal_locomotion`) |
 
 ## 2. Schema v2.1 Optional Fields
 
