@@ -308,6 +308,7 @@ def _compute_generic_harmonic_skin_weights(
         d = d_raw / r_scale
 
         # Side lock (explicit or inferred from _L/_R suffix for limbs/wings/ears/ribbons)
+        # Note: explicit side_lock="none" disables side locking (e.g. continuous cape cloth sheet).
         side_lock = b.get("side_lock")
         if side_lock is None and (bname.endswith("_L") or "_L_" in bname):
             if not bname.startswith("clavicle_"):

@@ -142,10 +142,10 @@ def build_choreography(bones: dict, archetype: str, fps: int = 12):
         if has_quad_legs:
             # Diagonal trot gait: (FL + HR) vs (FR + HL)
             for s, ph in (("L", phase), ("R", phase + math.pi)):
-                rots[f"front_upper_{s}"] = euler_xyz(rx_deg=26.0 * math.sin(ph))
-                rots[f"front_lower_{s}"] = euler_xyz(rx_deg=-35.0 * max(0.0, -math.cos(ph)))
-                rots[f"hind_upper_{s}"] = euler_xyz(rx_deg=24.0 * math.sin(ph + math.pi))
-                rots[f"hind_lower_{s}"] = euler_xyz(rx_deg=32.0 * max(0.0, math.cos(ph + math.pi)))
+                rots[f"front_upper_{s}"] = euler_xyz(rx_deg=18.0 * math.sin(ph))
+                rots[f"front_lower_{s}"] = euler_xyz(rx_deg=-24.0 * max(0.0, -math.cos(ph)))
+                rots[f"hind_upper_{s}"] = euler_xyz(rx_deg=16.0 * math.sin(ph + math.pi))
+                rots[f"hind_lower_{s}"] = euler_xyz(rx_deg=22.0 * max(0.0, math.cos(ph + math.pi)))
             if "spine_mid" in bones:
                 rots["spine_mid"] = euler_xyz(rx_deg=5.0 * math.sin(2 * phase), rz_deg=6.0 * math.sin(phase))
             if "neck" in bones:
@@ -178,6 +178,47 @@ def build_choreography(bones: dict, archetype: str, fps: int = 12):
     return frames
 
 
+def build_wing_showcase(bones: dict, fps: int = 12):
+    """Dedicated 3-angle articulated wing-flapping showcase (rear-3/4, front-3/4, side)."""
+    frames = []
+    views = [
+        ("WING FLAP [REAR 3/4]", -135.0, 14.0),
+        ("WING FLAP [FRONT 3/4]", -35.0, 10.0),
+        ("WING FLAP [SIDE PROFILE]", -85.0, 8.0),
+    ]
+    for lbl, yaw, pitch in views:
+        for i in range(24):
+            phase = 2.0 * math.pi * (i / 24.0) * 1.0  # 1 full slow flap per 24 frames (2 sec)
+            upstroke = max(0.0, math.sin(phase))
+            downstroke = max(0.0, -math.sin(phase))
+            rots = {}
+            for s, sgn in (("L", +1.0), ("R", -1.0)):
+                if f"wing_{s}_1" in bones:
+                    rots[f"wing_{s}_1"] = euler_xyz(
+                        rx_deg=8.0 * downstroke,
+                        ry_deg=sgn * (34.0 * math.sin(phase)),
+                        rz_deg=sgn * (-10.0 * downstroke + 8.0 * upstroke),
+                    )
+                if f"wing_{s}_2" in bones:
+                    rots[f"wing_{s}_2"] = euler_xyz(
+                        ry_deg=sgn * (-18.0 * upstroke + 8.0 * downstroke),
+                        rz_deg=sgn * (18.0 * upstroke),
+                    )
+                if f"wing_{s}_3" in bones:
+                    rots[f"wing_{s}_3"] = euler_xyz(
+                        rx_deg=-18.0 * upstroke,
+                        ry_deg=sgn * (-10.0 * upstroke),
+                    )
+            if "chest" in bones:
+                rots["chest"] = euler_xyz(rx_deg=5.0 * math.cos(phase))
+            if "neck" in bones:
+                rots["neck"] = euler_xyz(rx_deg=-4.0 * math.cos(phase))
+            shift = np.array([0.0, 0.0, 0.03 * (0.5 - 0.5 * math.cos(phase))], dtype=np.float32)
+            wind = np.array([0.2, 0.8, -0.4 * downstroke], dtype=np.float32)
+            frames.append((lbl, yaw, pitch, rots, shift, wind))
+    return frames
+
+
 def main():
     ap = argparse.ArgumentParser(description="Render modular v2.1 skeleton QA video via Spark GPU SplatSkinning.")
     ap.add_argument("--ply", required=True)
@@ -185,6 +226,7 @@ def main():
     ap.add_argument("--spark-dir", required=True)
     ap.add_argument("--out-mp4", required=True)
     ap.add_argument("--out-sheet", default=None)
+    ap.add_argument("--mode", choices=("standard", "wing_showcase"), default="standard")
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--fps", type=int, default=12)
     args = ap.parse_args()
@@ -219,7 +261,7 @@ def main():
     packed.tofile(skin_bin)
 
     # Simulate choreography + secondary motion
-    choreo = build_choreography(bones, archetype, fps=args.fps)
+    choreo = build_wing_showcase(bones, fps=args.fps) if args.mode == "wing_showcase" else build_choreography(bones, archetype, fps=args.fps)
     solver = SecondaryMotionSolver(bones, order)
     rots_in = [c[3] for c in choreo]
     shifts_in = [c[4] for c in choreo]

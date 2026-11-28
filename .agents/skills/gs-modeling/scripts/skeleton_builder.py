@@ -374,31 +374,31 @@ def fit_quadruped_skeleton(
         sgn = +1.0 if side == "L" else -1.0
         fl_lock = side if (pts_f[2][0] - mid_x) * sgn > 0.01 else "none"
         hl_lock = side if (pts_h[2][0] - mid_x) * sgn > 0.01 else "none"
-        # Front leg
+        # Front leg (slim pin_radius leaves smooth harmonic blend zone at shoulder/hip)
         bones[f"front_upper_{side}"] = make_bone(
             "chest", pts_f[0], pts_f[1], skin_group=f"front_leg_{side}", role="limb", side_lock=fl_lock,
-            limits_deg={"x": [-65, 65], "y": [-25, 25], "z": [-25, 25]},
+            pin_radius=0.022, limits_deg={"x": [-55, 55], "y": [-20, 20], "z": [-20, 20]},
         )
         bones[f"front_lower_{side}"] = make_bone(
             f"front_upper_{side}", pts_f[1], pts_f[2], skin_group=f"front_leg_{side}", role="limb", side_lock=fl_lock,
-            limits_deg={"x": [-95, 25], "y": [-15, 15], "z": [-15, 15]},
+            pin_radius=0.020, limits_deg={"x": [-85, 20], "y": [-12, 12], "z": [-12, 12]},
         )
         bones[f"front_paw_{side}"] = make_bone(
             f"front_lower_{side}", pts_f[2], pts_f[3], skin_group=f"front_leg_{side}", role="limb", side_lock=fl_lock,
-            limits_deg={"x": [-45, 45], "y": [-15, 15], "z": [-20, 20]},
+            pin_radius=0.020, limits_deg={"x": [-35, 35], "y": [-12, 12], "z": [-15, 15]},
         )
         # Hind leg
         bones[f"hind_upper_{side}"] = make_bone(
             "pelvis", pts_h[0], pts_h[1], skin_group=f"hind_leg_{side}", role="limb", side_lock=hl_lock,
-            limits_deg={"x": [-65, 65], "y": [-25, 25], "z": [-25, 25]},
+            pin_radius=0.024, limits_deg={"x": [-55, 55], "y": [-20, 20], "z": [-20, 20]},
         )
         bones[f"hind_lower_{side}"] = make_bone(
             f"hind_upper_{side}", pts_h[1], pts_h[2], skin_group=f"hind_leg_{side}", role="limb", side_lock=hl_lock,
-            limits_deg={"x": [-25, 95], "y": [-15, 15], "z": [-15, 15]},
+            pin_radius=0.020, limits_deg={"x": [-20, 85], "y": [-12, 12], "z": [-12, 12]},
         )
         bones[f"hind_paw_{side}"] = make_bone(
             f"hind_lower_{side}", pts_h[2], pts_h[3], skin_group=f"hind_leg_{side}", role="limb", side_lock=hl_lock,
-            limits_deg={"x": [-45, 45], "y": [-15, 15], "z": [-20, 20]},
+            pin_radius=0.020, limits_deg={"x": [-35, 35], "y": [-12, 12], "z": [-15, 15]},
         )
 
     return bones
@@ -749,16 +749,18 @@ def add_cape_or_skirt_bones(
             "min": [-10.0, cape_y_min, z_hem - 0.06],
             "max": [10.0, 10.0, float(p_base[2]) + 0.06],
         }
+        # All cape strands share ONE unified skin_group="cape" (and side_lock="none") so
+        # Harmonic heat diffusion blends them into a single continuous sheet of cloth without splitting!
         created.extend(add_chain(
             bones,
             name,
             parent,
             chain_pts,
-            skin_group=name,
+            skin_group="cape",
             role="cloth",
-            side_lock=side_lock,
-            pin_radius=0.026,
-            influence_radius_scale=0.85,
+            side_lock="none",
+            pin_radius=0.022,
+            influence_radius_scale=0.95,
             region_box=cape_box,
             limits_deg={"x": [0, 18], "y": [-10, 10], "z": [-10, 10]},
             dynamics=dyn,

@@ -281,6 +281,38 @@ class SecondaryMotionSolver:
             t_w = (h_w - R_w @ h_rest).astype(np.float32)
             world[bname] = (R_w, h_w, t_w)
 
+        # Lateral cloth coupling: bones sharing the same skin_group & role=="cloth" at the same depth
+        # gently blend their swing rotations so a multi-strand cape/skirt behaves as ONE continuous sheet!
+        cloth_buckets: dict[tuple[str, int], list[str]] = {}
+        for bname in self.dynamic_bones:
+            b = self.bones[bname]
+            if str(b.get("role", "")).lower() == "cloth" and b.get("skin_group"):
+                # Compute depth inside dynamic chain
+                depth = 0
+                cur = b.get("parent")
+                while cur in self._params:
+                    depth += 1
+                    cur = self.bones[cur].get("parent")
+                cloth_buckets.setdefault((str(b["skin_group"]), depth), []).append(bname)
+
+        coupled_any = False
+        for bucket in cloth_buckets.values():
+            if len(bucket) < 2:
+                continue
+            rvecs = [Rotation.from_matrix(out_rots[bn]).as_rotvec() for bn in bucket]
+            avg_rv = np.mean(rvecs, axis=0)
+            for bn, rv in zip(bucket, rvecs):
+                # Blend 50% toward sheet average -> keeps gentle wave while preventing tears
+                blended_rv = 0.50 * rv + 0.50 * avg_rv
+                out_rots[bn] = Rotation.from_rotvec(blended_rv).as_matrix().astype(np.float32)
+                coupled_any = True
+
+        if coupled_any:
+            world = compute_fk_transforms(self.bones, self.order, out_rots, root_shift=root_shift)
+            for bname in self.dynamic_bones:
+                R_w, h_w, _ = world[bname]
+                self._tip_pos[bname] = (h_w + R_w @ self._rest_vec[bname]).astype(np.float32)
+
         return out_rots, world
 
     def simulate_sequence(
