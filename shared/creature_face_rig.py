@@ -127,6 +127,70 @@ def _fit_local_face_quad(
     }
 
 
+def detect_eye_contour_and_brow(
+    xyz: np.ndarray,
+    rgb: np.ndarray,
+    fur_rgb: np.ndarray,
+    eye_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Separately detect the eye's upper contour (upper eyelash) vs an optional eyebrow above it.
+
+    Scans dark-splat density along +Z in the eye's local cheek frame:
+      - Peak 1 (dz in [0.35*rz, 1.15*rz]): upper eye contour / eyelash -> ALWAYS carved & moved by dynamic eyelid.
+      - Valley above Peak 1: fur/skin gap (`dz_lash_top`).
+      - Peak 2 above valley (dz in [1.20*rz, 2.20*rz]): optional eyebrow -> preserved strictly above `dz_brow_floor`.
+    """
+    sc = np.asarray(eye_meta["surface_center"], dtype=np.float32)
+    er = np.asarray(eye_meta["exclusion_radius"], dtype=np.float32)
+    rx, rz = float(er[0]), max(float(er[2]), 0.008)
+    yaw_deg = float(eye_meta.get("cheek_yaw_deg", 0.0))
+    pitch_deg = float(eye_meta.get("cheek_pitch_deg", 0.0))
+    R_align = (
+        Rotation.from_euler("z", yaw_deg, degrees=True).as_matrix()
+        @ Rotation.from_euler("x", pitch_deg, degrees=True).as_matrix()
+    ).astype(np.float32)
+
+    loc = (xyz - sc[None, :]) @ R_align
+    lum = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
+    d_fur = np.linalg.norm(rgb - fur_rgb[None, :], axis=1)
+    is_dark = (lum < 0.44) & (d_fur > 0.22) & (np.abs(loc[:, 0]) <= rx * 1.15) & (np.abs(loc[:, 1]) <= max(er[1] * 1.25, 0.025))
+
+    dzs = np.linspace(0.30 * rz, 2.25 * rz, 22)
+    step = float(dzs[1] - dzs[0]) * 0.90
+    counts = np.array([int((is_dark & (np.abs(loc[:, 2] - dz) <= step)).sum()) for dz in dzs], dtype=np.float32)
+
+    # Peak 1: upper eye contour / lash in lower half of scan
+    m_p1 = dzs <= 1.18 * rz
+    p1_idx = int(np.argmax(counts[m_p1]))
+    p1_val = float(counts[p1_idx])
+
+    # Valley immediately above Peak 1
+    search_end = min(len(counts), p1_idx + 8)
+    if p1_idx + 1 < search_end:
+        val_rel = int(np.argmin(counts[p1_idx + 1 : search_end]))
+        val_idx = p1_idx + 1 + val_rel
+    else:
+        val_idx = min(len(counts) - 1, p1_idx + 2)
+    dz_lash_top = float(np.clip(dzs[val_idx], 0.95 * rz, 1.48 * rz))
+
+    # Peak 2: distinct eyebrow above the fur/skin valley
+    has_brow = False
+    if val_idx + 2 < len(counts) and p1_val >= 4.0:
+        p2_val = float(np.max(counts[val_idx + 1 :]))
+        val_val = float(counts[val_idx])
+        if p2_val >= max(6.0, p1_val * 0.30) and val_val <= p2_val * 0.55:
+            has_brow = True
+
+    r_eye = float(eye_meta.get("eyeball_radius", rz * 1.4))
+    dz_brow_floor = dz_lash_top if has_brow else float(max(1.85 * rz, 1.45 * r_eye))
+    return {
+        "has_brow": has_brow,
+        "dz_lash_peak": float(dzs[p1_idx]),
+        "dz_lash_top": dz_lash_top,
+        "dz_brow_floor": dz_brow_floor,
+    }
+
+
 def fit_creature_face(
     data: np.ndarray,
     bones: dict[str, Any],
@@ -296,6 +360,8 @@ def fit_creature_face(
             "exclusion_radius": excl_r,
             "sclera_rgb": [0.97, 0.96, 0.94],
         }
+        contour_info = detect_eye_contour_and_brow(xyz[op > 0.25], rgb[op > 0.25], fur_rgb, meta_s)
+        meta_s.update(contour_info)
         eye_metas[side] = meta_s
         bones[side] = {
             "parent": "head",
@@ -307,7 +373,7 @@ def fit_creature_face(
             "meta": meta_s,
         }
 
-    # 3. Refine `jaw` bone & mouth `seam_cut` anchored to true face midline (midpoint between eyes) and snout tip
+    # 3. Refine `jaw` bone & mouth `seam_cut` anchored directly to the detected dark nose tip dot!
     sL = np.asarray(eye_metas["eye_L"]["surface_center"], dtype=np.float32)
     sR = np.asarray(eye_metas["eye_R"]["surface_center"], dtype=np.float32)
     face_cx = 0.5 * float(sL[0] + sR[0])
@@ -315,41 +381,51 @@ def fit_creature_face(
     eye_z = 0.5 * float(sL[2] + sR[2])
     eye_y = 0.5 * float(sL[1] + sR[1])
 
-    # Locate frontmost snout tip below the eyes
+    # Search full snout height up to eye_z + 0.03 so upward-tilted noses are never missed!
     m_snout = (
         (op > 0.25)
         & (np.abs(xyz[:, 0] - face_cx) <= d_eye * 0.42)
-        & (xyz[:, 2] >= eye_z - d_eye * 0.75)
-        & (xyz[:, 2] <= eye_z - d_eye * 0.05)
-        & (xyz[:, 1] <= eye_y)
+        & (xyz[:, 2] >= eye_z - d_eye * 0.85)
+        & (xyz[:, 2] <= eye_z + 0.03)
+        & (xyz[:, 1] <= eye_y - 0.015)
     )
     if int(m_snout.sum()) >= 20:
         spts = xyz[m_snout]
-        y_snout_front = float(np.percentile(spts[:, 1], 4))
-        z_snout_mid = float(np.percentile(spts[spts[:, 1] <= y_snout_front + 0.035, 2], 45))
+        srgb = rgb[m_snout]
+        slum = 0.299 * srgb[:, 0] + 0.587 * srgb[:, 1] + 0.114 * srgb[:, 2]
+        y_snout_front = float(np.percentile(spts[:, 1], 2))
+        m_nose = (spts[:, 1] <= y_snout_front + 0.025) & (slum < 0.48)
+        if int(m_nose.sum()) >= 5:
+            nose_pt = np.median(spts[m_nose], axis=0).astype(np.float32)
+            nose_x, y_nose, z_nose = float(nose_pt[0]), float(nose_pt[1]), float(nose_pt[2])
+        else:
+            nose_x = face_cx
+            y_nose = y_snout_front
+            z_nose = float(np.percentile(spts[spts[:, 1] <= y_snout_front + 0.025, 2], 65))
         z_chin_bot = float(np.percentile(spts[:, 2], 12))
     else:
-        y_snout_front = eye_y - 0.08
-        z_snout_mid = eye_z - 0.045
-        z_chin_bot = eye_z - 0.085
+        nose_x = face_cx
+        y_nose = eye_y - 0.08
+        z_nose = eye_z - 0.02
+        z_chin_bot = eye_z - 0.10
 
-    # Place mouth split right below nose tip so lower muzzle + chin open cleanly as a single jaw unit
-    mouth_z = 0.72 * z_snout_mid + 0.28 * z_chin_bot
-    p_jaw_hinge = np.array([face_cx, float(0.40 * eye_y + 0.60 * y_snout_front), mouth_z + 0.006], dtype=np.float32)
-    p_jaw_tip = np.array([face_cx, y_snout_front + 0.004, z_chin_bot], dtype=np.float32)
-    jaw_len = max(float(np.linalg.norm(p_jaw_tip - p_jaw_hinge)), 0.055)
-    cut_r = max(jaw_len * 1.25, d_eye * 0.50)
+    # True mouth smile line sits right below the nose tip (~1.8 cm below nose on height=1.0 creature)
+    mouth_z = float(max(z_chin_bot + 0.025, z_nose - min(d_eye * 0.13, 0.020)))
+    p_jaw_hinge = np.array([nose_x, float(0.45 * eye_y + 0.55 * y_nose), mouth_z + 0.004], dtype=np.float32)
+    p_jaw_tip = np.array([nose_x, y_nose + 0.006, max(z_chin_bot, mouth_z - 0.035)], dtype=np.float32)
+    jaw_len = max(float(np.linalg.norm(p_jaw_tip - p_jaw_hinge)), 0.048)
+    cut_r = max(jaw_len * 1.15, d_eye * 0.42)
 
     jaw_seam = {
-        "origin": [face_cx, float(0.30 * p_jaw_hinge[1] + 0.70 * p_jaw_tip[1]), float(mouth_z)],
+        "origin": [nose_x, float(0.25 * p_jaw_hinge[1] + 0.75 * p_jaw_tip[1]), mouth_z],
         "normal": [0.0, 0.0, 1.0],  # +Z = upper muzzle (head), -Z = lower jaw (jaw)
         "radius": float(cut_r),
         "keep_side": -1.0,
         "affect_parent": True,
     }
     jaw_box = {
-        "min": [face_cx - cut_r, y_snout_front - 0.04, z_chin_bot - 0.055],
-        "max": [face_cx + cut_r, float(p_jaw_hinge[1]) + 0.045, float(mouth_z) + 0.002],
+        "min": [nose_x - cut_r, y_nose - 0.035, z_chin_bot - 0.04],
+        "max": [nose_x + cut_r, float(p_jaw_hinge[1]) + 0.035, mouth_z + 0.002],
     }
     bones["jaw"] = {
         "parent": "head",
@@ -358,11 +434,10 @@ def fit_creature_face(
         "rest_quat_wxyz": list(IDENTITY_Q),
         "skin_group": "jaw",
         "role": "jaw",
-        "pin_radius": max(jaw_len * 0.65, 0.032),
-        "influence_radius_scale": 1.85,
+        "pin_radius": max(jaw_len * 0.60, 0.028),
+        "influence_radius_scale": 1.80,
         "region_box": jaw_box,
         "seam_cut": jaw_seam,
-        # In right-handed Z-up, -Y-pointing jaw opens DOWNWARD with positive Rx(+)!
         "limits_deg": {"x": [-4.0, 38.0], "y": [-3.0, 3.0], "z": [-5.0, 5.0]},
     }
 
@@ -371,13 +446,14 @@ def fit_creature_face(
         "d_eye": d_eye,
         "eye_z": eye_z,
         "eye_y": eye_y,
+        "nose_pos": [nose_x, y_nose, z_nose],
         "fur_rgb": fur_rgb.tolist(),
         "lash_rgb": lash_c.tolist(),
         "iris_palette": iris_palette,
         "eye_L": eye_metas["eye_L"],
         "eye_R": eye_metas["eye_R"],
-        "mouth_center": [face_cx, float(0.45 * p_jaw_hinge[1] + 0.55 * p_jaw_tip[1]), float(mouth_z)],
-        "mouth_width": float(min(d_eye * 0.42, 0.065)),
+        "mouth_center": [nose_x, float(y_nose + 0.006), mouth_z],
+        "mouth_width": float(min(d_eye * 0.36, 0.055)),
     }
 
 
@@ -412,14 +488,19 @@ def carve_creature_sockets(data: np.ndarray, face_meta: dict[str, Any]) -> np.nd
         rel_core = loc / np.maximum(er[None, :] * np.array([[0.78, 1.0, 0.72]], dtype=np.float32), 1e-4)
         in_core = np.sum(rel_core * rel_core, axis=1) < 1.0
 
-        # 2) Outer iris ring: selectively remove remaining chromatic iris splats ONLY,
-        # preserving face fur (d_fur <= 0.24) and dark upper-eyelash line (lum <= 0.20 at top)!
-        rel_outer = loc / np.maximum(er[None, :] * np.array([[1.48, 1.25, 1.55]], dtype=np.float32), 1e-4)
+        # 2) Outer iris + upper eye-contour ring: remove remaining iris AND the static upper eye-contour
+        #    (below dz_brow_floor) so the dynamic eyelid moves the contour itself when blinking!
+        #    Face fur (d_fur <= 0.24) and any detected eyebrow above dz_brow_floor are strictly preserved!
+        has_brow = bool(em.get("has_brow", False))
+        r_eye = float(em.get("eyeball_radius", er[2] * 1.4))
+        dz_brow_floor = float(em.get("dz_brow_floor", er[2] * 1.50))
+        z_outer = float(er[2] * 1.65) if has_brow else float(max(er[2] * 2.05, r_eye * 1.55))
+        rel_outer = loc / np.maximum(np.array([[er[0] * 1.52, er[1] * 1.25, z_outer]], dtype=np.float32), 1e-4)
         in_outer = np.sum(rel_outer * rel_outer, axis=1) < 1.0
-        is_dark_upper_lash = (loc[:, 2] > er[2] * 0.45) & (lum < 0.24)
-        is_iris_remnant = (d_fur > 0.24) & (sat > 0.28) & (lum < 0.76) & (~is_dark_upper_lash)
+        below_brow = loc[:, 2] <= dz_brow_floor
+        is_iris_or_contour = (d_fur > 0.24) & ((sat > 0.26) | (lum < 0.42)) & (lum < 0.78) & below_brow
 
-        keep &= ~(in_core | (in_outer & is_iris_remnant))
+        keep &= ~(in_core | (in_outer & is_iris_or_contour))
     return data[keep].copy()
 
 
@@ -522,14 +603,15 @@ def build_creature_eyelid_shell(
     dtype: np.dtype,
     body_xyz: np.ndarray | None = None,
     body_rgb: np.ndarray | None = None,
+    always_draw_lash: bool = True,
 ) -> np.ndarray:
-    """Generate a solid, fur-matched creature eyelid curtain + crisp arched lash line.
+    """Generate a solid, fur-matched creature eyelid curtain + crisp arched upper eye-contour.
 
-    - Samples local fur colors via kNN from surrounding cheek/brow splats (when body_xyz/body_rgb
-      are provided) so the closed eyelid blends seamlessly into the face instead of looking like a flat patch.
-    - Covers up to +1.22*rz to cleanly mask the static open-eye upper lash line during closure.
+    - Draws the upper contour even at blink=0 (`always_draw_lash=True`) so the entire eye contour
+      descends smoothly as one piece when blinking (no floating leftover upper line on browless animals!).
+    - Clamps the top curtain strictly below `dz_brow_floor` so detected eyebrows are never covered.
     """
-    if blink <= 0.02:
+    if blink <= 0.02 and not always_draw_lash:
         return np.zeros(0, dtype=dtype)
 
     sc = np.asarray(eye_meta["surface_center"], dtype=np.float32)
@@ -542,12 +624,13 @@ def build_creature_eyelid_shell(
     ).astype(np.float32)
 
     er = eye_meta["exclusion_radius"]
-    rx = float(er[0]) * 1.18
-    rz = float(er[2]) * 1.22
+    rx = float(er[0]) * 1.24
+    rz = float(er[2]) * 1.25
+    dz_brow_floor = float(eye_meta.get("dz_brow_floor", rz * 1.35))
 
-    # Curtain descends from +rz down to z_edge as blink goes 0 -> 1
-    z_top = rz * 1.05
-    z_bot = -rz * 1.05
+    # Curtain descends from z_top down to z_bot as blink goes 0 -> 1 (clipped strictly below eyebrow!)
+    z_top = min(rz * 1.15, dz_brow_floor)
+    z_bot = -rz * 0.95
     z_edge = z_top - float(np.clip(blink, 0.0, 1.0)) * (z_top - z_bot)
 
     nu, nv = 38, 28
@@ -638,26 +721,27 @@ def build_creature_mouth_patch(
         if int(m_m.sum()) >= 8:
             mc[1] = float(np.percentile(body_xyz[m_m, 1], 12))
 
-    rx = mw * (0.28 + 0.14 * float(open_amt))
-    rz = mw * (0.08 + 0.30 * float(open_amt))
+    rx = mw * (0.24 + 0.12 * float(open_amt))
+    rz = mw * (0.06 + 0.22 * float(open_amt))
 
-    nu, nv = 24, 20
+    nu, nv = 26, 22
     us = np.linspace(-1.0, 1.0, nu, dtype=np.float32)
     vs = np.linspace(-1.0, 1.0, nv, dtype=np.float32)
     uu, vv = np.meshgrid(us, vs)
     u = uu.ravel()
     v = vv.ravel()
     # Cute rounded-triangle / fox "a/o" mouth shape (wider at top, softly rounded at bottom)
-    r2 = (u / np.maximum(0.85 + 0.18 * v, 0.4)) ** 2 + v * v
+    r2 = (u / np.maximum(0.86 + 0.16 * v, 0.4)) ** 2 + v * v
     keep = r2 <= 1.0
     u, v, r2 = u[keep], v[keep], r2[keep]
 
-    # Sit cleanly flush on the frontmost muzzle skin so the open pink mouth reads clearly without burying
-    y_bowl = mc[1] - 0.0055 + 0.0020 * (1.0 - r2)
+    # Anchor upper lip cleanly below the nose and expand downward as jaw opens!
+    z_center = float(mc[2]) - 0.002 - rz * 0.55
+    y_bowl = mc[1] - 0.0045 + 0.0018 * (1.0 - r2)
     pts = np.column_stack([
         mc[0] + u * rx,
         y_bowl,
-        mc[2] - 0.002 + v * rz,
+        z_center + v * rz,
     ]).astype(np.float32)
 
     # Dark rose mouth interior + cute bright coral-pink tongue at bottom + soft rim
@@ -669,7 +753,11 @@ def build_creature_mouth_patch(
     rgb = dark_in[None, :] * (1.0 - t_tongue[:, None]) + tongue[None, :] * t_tongue[:, None]
     rgb = rgb * (1.0 - 0.65 * t_rim[:, None]) + rim_c[None, :] * (0.65 * t_rim[:, None])
 
-    s_xy = max(rx / nu * 1.8, 0.0022)
+    # Orient disc splats facing forward (-Y) so they render smoothly with zero scanline striping!
+    nrm = np.broadcast_to(np.array([[0.0, -1.0, 0.0]], dtype=np.float32), (len(pts), 3))
+    rot = _normal_to_quat_wxyz(nrm)
+
+    s_xy = max(rx / nu * 2.2, 0.0026)
     out = np.zeros(len(pts), dtype=dtype)
     out["x"], out["y"], out["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
     out["f_dc_0"] = (rgb[:, 0] - 0.5) / SH_C0
@@ -679,7 +767,7 @@ def build_creature_mouth_patch(
     out["scale_0"] = math.log(s_xy)
     out["scale_1"] = math.log(s_xy)
     out["scale_2"] = math.log(s_xy * 0.30)
-    out["rot_0"] = 1.0
+    out["rot_0"], out["rot_1"], out["rot_2"], out["rot_3"] = rot[:, 0], rot[:, 1], rot[:, 2], rot[:, 3]
     return out
 
 

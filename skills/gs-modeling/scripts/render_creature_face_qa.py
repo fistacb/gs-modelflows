@@ -139,16 +139,14 @@ def main():
     write_ply(anim_dir / "eye_L.ply", _ply_to_spark(eL_rest))
     write_ply(anim_dir / "eye_R.ply", _ply_to_spark(eR_rest))
 
-    # Pre-bake quantized kNN-fur-matched eyelid shells & animated mouth patches (0.0 = hidden!)
+    # Pre-bake quantized kNN-fur-matched eyelid shells (INCLUDING blink=0.0 upper contour!) & animated mouth patches
     blink_levels = [0.0, 0.25, 0.50, 0.75, 1.0]
     lid_files: dict[tuple[str, int], str] = {}
     for side in ("eye_L", "eye_R"):
         for bi, bv in enumerate(blink_levels):
-            if bv <= 0.02:
-                continue
             lid_ply = build_creature_eyelid_shell(
                 face_meta[side], face_meta["fur_rgb"], face_meta["lash_rgb"], bv, data.dtype,
-                body_xyz=xyz, body_rgb=body_rgb,
+                body_xyz=xyz, body_rgb=body_rgb, always_draw_lash=True,
             )
             if len(lid_ply) > 0:
                 fname = f"lid_{side}_{bi}.ply"
@@ -312,8 +310,8 @@ def main():
     print(f"[CreatureFaceQA] Saved Face QA MP4 -> {out_mp4} ({time.perf_counter() - t0:.1f}s)")
 
     if args.out_sheet:
-        # Pick representative peak frames across all 4 parts (blink closed, gaze L/R, wink, jaw open)
-        pick = [0, 7, 17, 30, 42, 60, 72, 78, 90]
+        # Pick representative peak frames across all 4 parts (open, blink closed, gaze L/R, wink, mouth peak open!)
+        pick = [0, 7, 17, 30, 42, 60, 72, 75, 87]
         pick = [min(p, len(video_frames) - 1) for p in pick]
         tile = 320
         sheet = Image.new("RGB", (tile * 3, tile * 3), (240, 242, 246))
