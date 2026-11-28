@@ -441,23 +441,46 @@ def fit_creature_face(
         z_nose = eye_z - 0.02
         z_chin_bot = eye_z - 0.10
 
-    # True mouth smile line sits right below the nose tip (~1.8 cm below nose on height=1.0 creature)
-    mouth_z = float(max(z_chin_bot + 0.025, z_nose - min(d_eye * 0.13, 0.020)))
-    p_jaw_hinge = np.array([nose_x, float(0.45 * eye_y + 0.55 * y_nose), mouth_z + 0.004], dtype=np.float32)
-    p_jaw_tip = np.array([nose_x, y_nose + 0.006, max(z_chin_bot, mouth_z - 0.035)], dtype=np.float32)
+    # True mouth smile line: detect actual painted closed-mouth splats below the nose tip if present,
+    # otherwise fall back to ~1.8 cm below nose tip.
+    mouth_z_fallback = float(max(z_chin_bot + 0.025, z_nose - min(d_eye * 0.13, 0.020)))
+    mouth_x = nose_x
+    mouth_y = float(y_nose + 0.006)
+    mouth_z = mouth_z_fallback
+    mw_est = float(min(d_eye * 0.36, 0.055))
+    m_mouth_line = (
+        (op > 0.20)
+        & (np.abs(xyz[:, 0] - nose_x) <= mw_est * 0.55)
+        & (xyz[:, 1] <= y_nose + 0.028)
+        & (xyz[:, 2] >= z_nose - min(d_eye * 0.32, 0.050))
+        & (xyz[:, 2] <= z_nose - 0.010)
+        & (d_fur_all > 0.15)
+        & ((0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]) < 0.78)
+    )
+    if int(m_mouth_line.sum()) >= 6:
+        mp_med = np.median(xyz[m_mouth_line], axis=0).astype(np.float32)
+        mouth_x = float(0.5 * nose_x + 0.5 * float(mp_med[0]))
+        mouth_y = float(mp_med[1])
+        mouth_z = float(np.clip(mp_med[2], z_chin_bot + 0.018, z_nose - 0.014))
+        mouth_line_rgb = np.clip(np.median(rgb[m_mouth_line], axis=0), 0.20, 0.85).astype(np.float32)
+    else:
+        mouth_line_rgb = np.array([0.74, 0.44, 0.42], dtype=np.float32)
+
+    p_jaw_hinge = np.array([mouth_x, float(0.45 * eye_y + 0.55 * y_nose), mouth_z + 0.006], dtype=np.float32)
+    p_jaw_tip = np.array([mouth_x, mouth_y, max(z_chin_bot, mouth_z - 0.032)], dtype=np.float32)
     jaw_len = max(float(np.linalg.norm(p_jaw_tip - p_jaw_hinge)), 0.048)
     cut_r = max(jaw_len * 1.15, d_eye * 0.42)
 
     jaw_seam = {
-        "origin": [nose_x, float(0.25 * p_jaw_hinge[1] + 0.75 * p_jaw_tip[1]), mouth_z],
+        "origin": [mouth_x, float(0.25 * p_jaw_hinge[1] + 0.75 * p_jaw_tip[1]), mouth_z],
         "normal": [0.0, 0.0, 1.0],  # +Z = upper muzzle (head), -Z = lower jaw (jaw)
         "radius": float(cut_r),
         "keep_side": -1.0,
         "affect_parent": True,
     }
     jaw_box = {
-        "min": [nose_x - cut_r, y_nose - 0.035, z_chin_bot - 0.04],
-        "max": [nose_x + cut_r, float(p_jaw_hinge[1]) + 0.035, mouth_z + 0.002],
+        "min": [mouth_x - cut_r, y_nose - 0.035, z_chin_bot - 0.04],
+        "max": [mouth_x + cut_r, float(p_jaw_hinge[1]) + 0.035, mouth_z + 0.002],
     }
     bones["jaw"] = {
         "parent": "head",
@@ -481,11 +504,12 @@ def fit_creature_face(
         "nose_pos": [nose_x, y_nose, z_nose],
         "fur_rgb": fur_rgb.tolist(),
         "lash_rgb": lash_c.tolist(),
+        "mouth_line_rgb": mouth_line_rgb.tolist(),
         "iris_palette": iris_palette,
         "eye_L": eye_metas["eye_L"],
         "eye_R": eye_metas["eye_R"],
-        "mouth_center": [nose_x, float(y_nose + 0.006), mouth_z],
-        "mouth_width": float(min(d_eye * 0.36, 0.055)),
+        "mouth_center": [mouth_x, mouth_y, mouth_z],
+        "mouth_width": mw_est,
     }
 
 
@@ -627,6 +651,38 @@ def carve_creature_sockets(data: np.ndarray, face_meta: dict[str, Any]) -> np.nd
 
         a_m = alpha[m_blend][:, None]
         rgb_o[m_blend] = rgb_o[m_blend] * (1.0 - a_m) + target_rgb * a_m
+
+    # 4) Soft fur-inpainting of the original static closed-mouth smile line so opening the dynamic mouth
+    #    NEVER produces a creepy double-mouth (strictly protects the dark nose tip above z_nose - 0.009)!
+    if "mouth_center" in face_meta and "nose_pos" in face_meta:
+        mc = np.asarray(face_meta["mouth_center"], dtype=np.float32)
+        np_pos = np.asarray(face_meta["nose_pos"], dtype=np.float32)
+        mw = float(face_meta.get("mouth_width", 0.050))
+        d_fur_m = np.linalg.norm(rgb_o - fur_rgb[None, :], axis=1)
+        lum_m = 0.299 * rgb_o[:, 0] + 0.587 * rgb_o[:, 1] + 0.114 * rgb_o[:, 2]
+
+        w_mx = _smoothstep(mw * 0.70, mw * 0.40, np.abs(xyz_o[:, 0] - mc[0]))
+        w_my = _smoothstep(mc[1] + 0.032, mc[1] + 0.012, xyz_o[:, 1])
+        w_mz_top = _smoothstep(float(np_pos[2]) - 0.008, float(np_pos[2]) - 0.015, xyz_o[:, 2])
+        w_mz_bot = _smoothstep(mc[2] - 0.026, mc[2] - 0.012, xyz_o[:, 2])
+        w_mcol = _smoothstep(0.10, 0.20, d_fur_m) * _smoothstep(0.84, 0.68, lum_m)
+        alpha_m = (w_mx * w_my * w_mz_top * w_mz_bot * w_mcol * 0.96).astype(np.float32)
+        m_mblend = alpha_m > 0.03
+        if np.any(m_mblend):
+            m_mfur = (d_fur_m < 0.18) & (np.linalg.norm(xyz_o - mc[None, :], axis=1) < max(mw * 1.8, 0.08))
+            if int(m_mfur.sum()) >= 12:
+                tree_m = _cKDTree(xyz_o[m_mfur])
+                dm, nnm = tree_m.query(xyz_o[m_mblend], k=min(6, int(m_mfur.sum())))
+                if nnm.ndim == 1:
+                    nnm = nnm[:, None]
+                    dm = dm[:, None]
+                wm = 1.0 / np.maximum(dm, 1e-4)
+                wm /= np.sum(wm, axis=1, keepdims=True)
+                tgt_m = np.sum(rgb_o[m_mfur][nnm] * wm[:, :, None], axis=1).astype(np.float32)
+            else:
+                tgt_m = np.broadcast_to(fur_rgb[None, :], (int(m_mblend.sum()), 3)).copy()
+            am = alpha_m[m_mblend][:, None]
+            rgb_o[m_mblend] = rgb_o[m_mblend] * (1.0 - am) + tgt_m * am
 
     out["f_dc_0"] = (rgb_o[:, 0] - 0.5) / SH_C0
     out["f_dc_1"] = (rgb_o[:, 1] - 0.5) / SH_C0
@@ -895,14 +951,20 @@ def build_creature_mouth_patch(
     open_amt: float,
     dtype: np.dtype,
     body_xyz: np.ndarray | None = None,
+    always_draw_closed: bool = True,
 ) -> np.ndarray:
-    """Build a cute animated creature mouth patch flush on the front muzzle surface (hidden when closed)."""
-    if open_amt <= 0.02:
+    """Build a unified animated creature mouth (from closed smile line at open_amt=0.0 to open mouth at 1.0).
+
+    Paired with static mouth-line fur-inpainting in `carve_creature_sockets`, so there is ALWAYS
+    exactly ONE mouth on the face (never a creepy double-mouth when opening!).
+    """
+    if open_amt <= 0.02 and not always_draw_closed:
         return np.zeros(0, dtype=dtype)
 
     mc = np.asarray(face_meta["mouth_center"], dtype=np.float32).copy()
     mw = float(face_meta.get("mouth_width", 0.045))
     fur_c = np.asarray(face_meta.get("fur_rgb", [0.94, 0.84, 0.78]), dtype=np.float32)
+    smile_c = np.asarray(face_meta.get("mouth_line_rgb", [0.74, 0.44, 0.42]), dtype=np.float32) * 0.86
 
     # Snap mouth surface Y to the actual frontmost muzzle surface right at (mc[0], mc[2])
     if body_xyz is not None and len(body_xyz) >= 50:
@@ -910,10 +972,47 @@ def build_creature_mouth_patch(
         if int(m_m.sum()) >= 8:
             mc[1] = float(np.percentile(body_xyz[m_m, 1], 12))
 
-    # Start as a thin horizontal smile-line slit at low open_amt, growing smoothly downward as jaw opens!
     o = float(np.clip(open_amt, 0.0, 1.0))
-    rx = mw * (0.16 + 0.19 * (o ** 0.75))
-    rz = mw * (0.018 + 0.23 * (o ** 1.15))
+
+    # Closed smile-line state (open_amt <= 0.04): draw a delicate curved smile line right at mouth_center
+    if o <= 0.04:
+        nu_s, nv_s = 28, 5
+        us = np.linspace(-1.0, 1.0, nu_s, dtype=np.float32)
+        vs = np.linspace(-1.0, 1.0, nv_s, dtype=np.float32)
+        uu, vv = np.meshgrid(us, vs)
+        u = uu.ravel()
+        v = vv.ravel()
+        rx_s = mw * 0.21
+        thick = max(mw * 0.032, 0.0014) * np.sqrt(np.maximum(0.15, 1.0 - (u * 0.92) ** 2))
+        # Cute gentle upward-curved fox smile arc (`u*u` rises at corners)
+        z_arc = mc[2] + mw * 0.045 * (u * u - 0.35) + v * thick
+        y_arc = mc[1] - 0.0046 + 0.0012 * (u * u)
+        pts = np.column_stack([mc[0] + u * rx_s, y_arc, z_arc]).astype(np.float32)
+
+        w_v = np.exp(-(v / 0.65) ** 2)
+        w_u = _smoothstep(1.0, 0.65, np.abs(u))
+        w_s = np.clip(w_v * w_u, 0.0, 1.0).astype(np.float32)
+        rgb = fur_c[None, :] * (1.0 - w_s[:, None]) + smile_c[None, :] * w_s[:, None]
+        op_arr = (1.4 + 2.8 * w_s).astype(np.float32)
+
+        nrm = np.broadcast_to(np.array([[0.0, -1.0, 0.0]], dtype=np.float32), (len(pts), 3))
+        rot = _normal_to_quat_wxyz(nrm)
+        s_xy = max(rx_s / nu_s * 2.0, 0.0016)
+        out = np.zeros(len(pts), dtype=dtype)
+        out["x"], out["y"], out["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+        out["f_dc_0"] = (rgb[:, 0] - 0.5) / SH_C0
+        out["f_dc_1"] = (rgb[:, 1] - 0.5) / SH_C0
+        out["f_dc_2"] = (rgb[:, 2] - 0.5) / SH_C0
+        out["opacity"] = op_arr
+        out["scale_0"] = math.log(s_xy)
+        out["scale_1"] = math.log(s_xy)
+        out["scale_2"] = math.log(s_xy * 0.30)
+        out["rot_0"], out["rot_1"], out["rot_2"], out["rot_3"] = rot[:, 0], rot[:, 1], rot[:, 2], rot[:, 3]
+        return out
+
+    # Open mouth state (o > 0.04): grows smoothly from the exact same smile-line position downward!
+    rx = mw * (0.20 + 0.16 * (o ** 0.75))
+    rz = mw * (0.025 + 0.21 * (o ** 1.10))
 
     nu, nv = 26, 22
     us = np.linspace(-1.0, 1.0, nu, dtype=np.float32)
@@ -926,8 +1025,8 @@ def build_creature_mouth_patch(
     keep = r2 <= 1.0
     u, v, r2 = u[keep], v[keep], r2[keep]
 
-    # Anchor upper lip cleanly on the closed smile line and expand downward as jaw opens!
-    z_center = float(mc[2]) - 0.0015 - rz * 0.62
+    # Anchor upper lip right on the closed smile line and expand downward as jaw opens!
+    z_center = float(mc[2]) - rz * 0.55
     y_bowl = mc[1] - 0.0052 + 0.0008 * (1.0 - r2)
     pts = np.column_stack([
         mc[0] + u * rx,
@@ -950,9 +1049,9 @@ def build_creature_mouth_patch(
     nrm = np.broadcast_to(np.array([[0.0, -1.0, 0.0]], dtype=np.float32), (len(pts), 3))
     rot = _normal_to_quat_wxyz(nrm)
 
-    # Smooth opacity fade-in at small openings + feathered rim so the mouth never pops abruptly
-    fade_in = float(_smoothstep(0.02, 0.25, np.array([o], dtype=np.float32))[0])
-    op_arr = (1.2 + (3.6 * fade_in) * (1.0 - 0.55 * t_feather)).astype(np.float32)
+    # Smooth opacity ramp + feathered rim so the mouth transitions seamlessly from smile line to open
+    fade_in = float(_smoothstep(0.02, 0.22, np.array([o], dtype=np.float32))[0])
+    op_arr = (1.6 + (3.2 * fade_in) * (1.0 - 0.55 * t_feather)).astype(np.float32)
 
     s_xy = max(rx / nu * 2.2, 0.0022)
     out = np.zeros(len(pts), dtype=dtype)

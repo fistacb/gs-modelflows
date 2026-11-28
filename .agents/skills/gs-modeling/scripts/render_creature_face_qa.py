@@ -156,9 +156,7 @@ def main():
     mouth_levels = [0.0, 0.10, 0.22, 0.36, 0.52, 0.68, 0.84, 1.0]
     mouth_files: dict[int, str] = {}
     for mi, mv in enumerate(mouth_levels):
-        if mv <= 0.02:
-            continue
-        mply = build_creature_mouth_patch(face_meta, mv, data.dtype, body_xyz=xyz)
+        mply = build_creature_mouth_patch(face_meta, mv, data.dtype, body_xyz=xyz, always_draw_closed=True)
         if len(mply) > 0:
             fname = f"mouth_{mi}.ply"
             write_ply(anim_dir / fname, _ply_to_spark(mply))
