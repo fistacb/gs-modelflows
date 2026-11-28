@@ -153,10 +153,10 @@ def main():
                 write_ply(anim_dir / fname, _ply_to_spark(lid_ply))
                 lid_files[(side, bi)] = f"frames/{anim_tag}/{fname}"
 
-    mouth_levels = [0.0, 0.25, 0.50, 0.75, 1.0]
+    mouth_levels = [0.0, 0.10, 0.22, 0.36, 0.52, 0.68, 0.84, 1.0]
     mouth_files: dict[int, str] = {}
     for mi, mv in enumerate(mouth_levels):
-        if mv <= 0.04:
+        if mv <= 0.02:
             continue
         mply = build_creature_mouth_patch(face_meta, mv, data.dtype, body_xyz=xyz)
         if len(mply) > 0:
@@ -197,13 +197,19 @@ def main():
         }
         choreo.append(("3. WINK & HEAD TILT", -15.0, 6.0, rots, w, 0.0, -6.0 * w, 0.0, 0.0))
 
-    # Part 4: JAW OPEN / BARK (24f, animated procedural mouth + subtle synchronized jaw drop)
+    # Part 4: JAW OPEN / BARK (24f, smooth eased opening & closing synchronized with jaw drop)
     for i in range(24):
         t = i / 24.0
-        j_open = max(0.0, math.sin(2 * math.pi * t * 2.0)) ** 0.85
+        # Smooth ease-in/ease-out: 1 gentle full open (frames 0..14) + 1 cute smaller yap (frames 14..24)
+        if i < 14:
+            u = i / 13.0
+            j_open = math.sin(math.pi * u) ** 1.75
+        else:
+            u = (i - 14) / 9.0
+            j_open = 0.72 * (math.sin(math.pi * u) ** 1.75)
         rots = {
             "head": euler_xyz(rx_deg=-7.0 * j_open, rz_deg=5.0 * math.sin(2 * math.pi * t)),
-            "jaw": euler_xyz(rx_deg=+10.0 * j_open),
+            "jaw": euler_xyz(rx_deg=+16.0 * j_open),
         }
         choreo.append(("4. MOUTH & JAW", -24.0 + 16.0 * math.sin(math.pi * t), 5.0, rots, 0.0, 0.0, 0.0, -4.0 * j_open, j_open))
 
@@ -310,8 +316,8 @@ def main():
     print(f"[CreatureFaceQA] Saved Face QA MP4 -> {out_mp4} ({time.perf_counter() - t0:.1f}s)")
 
     if args.out_sheet:
-        # Pick representative peak frames across all 4 parts (open, blink closed, gaze L/R, wink, mouth peak open!)
-        pick = [0, 7, 17, 30, 42, 60, 72, 75, 87]
+        # Pick representative peak frames across all 4 parts (open, blink, gaze L/R, wink, mouth closed -> half -> full!)
+        pick = [0, 7, 17, 30, 42, 60, 72, 75, 78]
         pick = [min(p, len(video_frames) - 1) for p in pick]
         tile = 320
         sheet = Image.new("RGB", (tile * 3, tile * 3), (240, 242, 246))

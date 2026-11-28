@@ -897,11 +897,12 @@ def build_creature_mouth_patch(
     body_xyz: np.ndarray | None = None,
 ) -> np.ndarray:
     """Build a cute animated creature mouth patch flush on the front muzzle surface (hidden when closed)."""
-    if open_amt <= 0.04:
+    if open_amt <= 0.02:
         return np.zeros(0, dtype=dtype)
 
     mc = np.asarray(face_meta["mouth_center"], dtype=np.float32).copy()
     mw = float(face_meta.get("mouth_width", 0.045))
+    fur_c = np.asarray(face_meta.get("fur_rgb", [0.94, 0.84, 0.78]), dtype=np.float32)
 
     # Snap mouth surface Y to the actual frontmost muzzle surface right at (mc[0], mc[2])
     if body_xyz is not None and len(body_xyz) >= 50:
@@ -909,8 +910,10 @@ def build_creature_mouth_patch(
         if int(m_m.sum()) >= 8:
             mc[1] = float(np.percentile(body_xyz[m_m, 1], 12))
 
-    rx = mw * (0.24 + 0.12 * float(open_amt))
-    rz = mw * (0.06 + 0.22 * float(open_amt))
+    # Start as a thin horizontal smile-line slit at low open_amt, growing smoothly downward as jaw opens!
+    o = float(np.clip(open_amt, 0.0, 1.0))
+    rx = mw * (0.16 + 0.19 * (o ** 0.75))
+    rz = mw * (0.018 + 0.23 * (o ** 1.15))
 
     nu, nv = 26, 22
     us = np.linspace(-1.0, 1.0, nu, dtype=np.float32)
@@ -923,35 +926,41 @@ def build_creature_mouth_patch(
     keep = r2 <= 1.0
     u, v, r2 = u[keep], v[keep], r2[keep]
 
-    # Anchor upper lip cleanly below the nose and expand downward as jaw opens!
-    z_center = float(mc[2]) - 0.002 - rz * 0.55
-    y_bowl = mc[1] - 0.0045 + 0.0018 * (1.0 - r2)
+    # Anchor upper lip cleanly on the closed smile line and expand downward as jaw opens!
+    z_center = float(mc[2]) - 0.0015 - rz * 0.62
+    y_bowl = mc[1] - 0.0052 + 0.0008 * (1.0 - r2)
     pts = np.column_stack([
         mc[0] + u * rx,
         y_bowl,
         z_center + v * rz,
     ]).astype(np.float32)
 
-    # Dark rose mouth interior + cute bright coral-pink tongue at bottom + soft rim
-    dark_in = np.array([0.38, 0.10, 0.14], dtype=np.float32)
-    tongue = np.array([0.92, 0.44, 0.48], dtype=np.float32)
-    rim_c = np.array([0.52, 0.22, 0.24], dtype=np.float32)
-    t_tongue = _smoothstep(0.05, -0.55, v) * _smoothstep(0.95, 0.45, r2)
-    t_rim = _smoothstep(0.70, 0.98, r2)
+    # Warm painterly rose mouth interior + soft coral-pink tongue + feathered fur-blended outer lip edge
+    dark_in = np.array([0.45, 0.14, 0.18], dtype=np.float32)
+    tongue = np.array([0.94, 0.48, 0.52], dtype=np.float32)
+    rim_c = np.array([0.62, 0.30, 0.32], dtype=np.float32)
+    t_tongue = _smoothstep(0.05, -0.55, v) * _smoothstep(0.92, 0.42, r2) * _smoothstep(0.12, 0.40, o)
+    t_rim = _smoothstep(0.65, 0.92, r2)
+    t_feather = _smoothstep(0.76, 1.0, r2)
     rgb = dark_in[None, :] * (1.0 - t_tongue[:, None]) + tongue[None, :] * t_tongue[:, None]
-    rgb = rgb * (1.0 - 0.65 * t_rim[:, None]) + rim_c[None, :] * (0.65 * t_rim[:, None])
+    rgb = rgb * (1.0 - 0.55 * t_rim[:, None]) + rim_c[None, :] * (0.55 * t_rim[:, None])
+    rgb = rgb * (1.0 - 0.65 * t_feather[:, None]) + fur_c[None, :] * (0.65 * t_feather[:, None])
 
     # Orient disc splats facing forward (-Y) so they render smoothly with zero scanline striping!
     nrm = np.broadcast_to(np.array([[0.0, -1.0, 0.0]], dtype=np.float32), (len(pts), 3))
     rot = _normal_to_quat_wxyz(nrm)
 
-    s_xy = max(rx / nu * 2.2, 0.0026)
+    # Smooth opacity fade-in at small openings + feathered rim so the mouth never pops abruptly
+    fade_in = float(_smoothstep(0.02, 0.25, np.array([o], dtype=np.float32))[0])
+    op_arr = (1.2 + (3.6 * fade_in) * (1.0 - 0.55 * t_feather)).astype(np.float32)
+
+    s_xy = max(rx / nu * 2.2, 0.0022)
     out = np.zeros(len(pts), dtype=dtype)
     out["x"], out["y"], out["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
     out["f_dc_0"] = (rgb[:, 0] - 0.5) / SH_C0
     out["f_dc_1"] = (rgb[:, 1] - 0.5) / SH_C0
     out["f_dc_2"] = (rgb[:, 2] - 0.5) / SH_C0
-    out["opacity"] = 5.2
+    out["opacity"] = op_arr
     out["scale_0"] = math.log(s_xy)
     out["scale_1"] = math.log(s_xy)
     out["scale_2"] = math.log(s_xy * 0.30)
