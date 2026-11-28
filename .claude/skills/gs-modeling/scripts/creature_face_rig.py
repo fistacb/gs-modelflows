@@ -264,20 +264,32 @@ def fit_creature_face(
         quad_coef[0] = fitted_y
         surf[1] = fitted_y
 
-        # Match humanoid step2_fit_skeleton rule: lock eyeball X/Z strictly to surface_center[0, 2]
-        # and recess purely along +Y so frontmost pole (eb_ctr[1] - r_eye) sits 3-4mm INSIDE face surface!
-        recess = max(r_eye * 0.18, 0.0035)
-        eb_ctr = np.array([float(surf[0]), float(fitted_y + r_eye + recess), float(surf[2])], dtype=np.float32)
-        carve_ctr = np.array([float(surf[0]), float(fitted_y + r_eye * 0.12), float(surf[2])], dtype=np.float32)
-        excl_r = [float(max(span[0] * 0.42, r_eye * 0.72)), float(r_eye * 1.05), float(max(span[2] * 0.34, r_eye * 0.48))]
+        # Exact 1:1 co-axial alignment between carved socket center (surf) and eyeball iris pole:
+        # Let g_hat = R_align @ [0, -1, 0] be the eyeball's painted iris direction.
+        # Placing eb_ctr = surf - (r_eye + recess) * g_hat guarantees:
+        #   iris_pole = eb_ctr + r_eye * g_hat == surf - recess * g_hat  (0.0 mm lateral/vertical drift!)
+        yaw_deg = float(fit["cheek_yaw_deg"])
+        pitch_deg = float(fit["cheek_pitch_deg"])
+        R_align = (
+            Rotation.from_euler("z", yaw_deg, degrees=True).as_matrix()
+            @ Rotation.from_euler("x", pitch_deg, degrees=True).as_matrix()
+        ).astype(np.float32)
+        g_hat = (R_align @ np.array([0.0, -1.0, 0.0], dtype=np.float32)).astype(np.float32)
+        g_hat /= max(float(np.linalg.norm(g_hat)), 1e-8)
+
+        recess = max(r_eye * 0.14, 0.0025)
+        eb_ctr = (surf - g_hat * (r_eye + recess)).astype(np.float32)
+        carve_ctr = (surf - g_hat * (r_eye * 0.10)).astype(np.float32)
+        excl_r = [float(max(span[0] * 0.44, r_eye * 0.74)), float(r_eye * 1.05), float(max(span[2] * 0.36, r_eye * 0.50))]
 
         meta_s = {
             "detected_iris_points": int(len(pts_s)),
             "surface_center": surf.tolist(),
             "eyeball_center": eb_ctr.tolist(),
             "eyeball_radius": r_eye,
-            "cheek_yaw_deg": float(fit["cheek_yaw_deg"]),
-            "cheek_pitch_deg": float(fit["cheek_pitch_deg"]),
+            "cheek_yaw_deg": yaw_deg,
+            "cheek_pitch_deg": pitch_deg,
+            "gaze_dir": g_hat.tolist(),
             "face_quad_coef": quad_coef,
             "normal": fit["normal"],
             "carve_center": carve_ctr.tolist(),
@@ -288,7 +300,7 @@ def fit_creature_face(
         bones[side] = {
             "parent": "head",
             "head": eb_ctr.tolist(),
-            "tail": [float(eb_ctr[0]), float(eb_ctr[1] - r_eye), float(eb_ctr[2])],
+            "tail": (eb_ctr + g_hat * r_eye).tolist(),
             "rest_quat_wxyz": list(IDENTITY_Q),
             "limits_deg": {"x": [-15, 14], "y": [0, 0], "z": [-24, 24]},
             "non_deforming": True,
