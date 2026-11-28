@@ -152,33 +152,37 @@ def detect_eye_contour_and_brow(
 
     loc = (xyz - sc[None, :]) @ R_align
     lum = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
+    sat = rgb.max(axis=1) - rgb.min(axis=1)
     d_fur = np.linalg.norm(rgb - fur_rgb[None, :], axis=1)
-    is_dark = (lum < 0.44) & (d_fur > 0.22) & (np.abs(loc[:, 0]) <= rx * 1.15) & (np.abs(loc[:, 1]) <= max(er[1] * 1.25, 0.025))
+    # Exclude bright saturated fur markings (e.g. orange forehead patterns) from dark lash/brow detection
+    is_bright_marking = (sat > 0.42) & (rgb[:, 0] > 0.52)
+    is_dark = (lum < 0.40) & (~is_bright_marking) & (d_fur > 0.22) & (np.abs(loc[:, 0]) <= rx * 1.15) & (np.abs(loc[:, 1]) <= max(er[1] * 1.25, 0.025))
 
-    dzs = np.linspace(0.30 * rz, 2.25 * rz, 22)
+    dzs = np.linspace(0.65 * rz, 2.45 * rz, 22)
     step = float(dzs[1] - dzs[0]) * 0.90
     counts = np.array([int((is_dark & (np.abs(loc[:, 2] - dz) <= step)).sum()) for dz in dzs], dtype=np.float32)
 
-    # Peak 1: upper eye contour / lash in lower half of scan
-    m_p1 = dzs <= 1.18 * rz
+    # Peak 1: upper eye contour / lash in [0.65*rz, 1.45*rz] (never inside the pupil!)
+    m_p1 = dzs <= 1.45 * rz
     p1_idx = int(np.argmax(counts[m_p1]))
     p1_val = float(counts[p1_idx])
 
-    # Valley immediately above Peak 1
-    search_end = min(len(counts), p1_idx + 8)
+    # Valley immediately above Peak 1 (must be above the upper lash line)
+    search_end = min(len(counts), p1_idx + 7)
     if p1_idx + 1 < search_end:
         val_rel = int(np.argmin(counts[p1_idx + 1 : search_end]))
         val_idx = p1_idx + 1 + val_rel
     else:
         val_idx = min(len(counts) - 1, p1_idx + 2)
-    dz_lash_top = float(np.clip(dzs[val_idx], 0.95 * rz, 1.48 * rz))
+    dz_lash_top = float(np.clip(dzs[val_idx], 1.25 * rz, 1.65 * rz))
 
-    # Peak 2: distinct eyebrow above the fur/skin valley
+    # Peak 2: distinct eyebrow STRICTLY above the fur/skin valley (dz >= 1.65 * rz)
     has_brow = False
-    if val_idx + 2 < len(counts) and p1_val >= 4.0:
-        p2_val = float(np.max(counts[val_idx + 1 :]))
+    m_p2 = (np.arange(len(counts)) > val_idx) & (dzs >= max(dz_lash_top + 0.22 * rz, 1.65 * rz))
+    if np.any(m_p2) and p1_val >= 4.0:
+        p2_val = float(np.max(counts[m_p2]))
         val_val = float(counts[val_idx])
-        if p2_val >= max(6.0, p1_val * 0.30) and val_val <= p2_val * 0.55:
+        if p2_val >= max(8.0, p1_val * 0.35) and val_val <= p2_val * 0.45:
             has_brow = True
 
     r_eye = float(eye_meta.get("eyeball_radius", rz * 1.4))
@@ -323,7 +327,7 @@ def fit_creature_face(
 
         p10, p50, p90 = np.percentile(pts_core, [10, 50, 90], axis=0)
         span = p90 - p10
-        y_eye_actual = float(np.percentile(pts_core[:, 1], 42))
+        y_eye_actual = float(np.percentile(pts_core[:, 1], 28))
         surf = np.array([
             float(0.5 * (p10[0] + p90[0])),
             y_eye_actual,
@@ -369,7 +373,7 @@ def fit_creature_face(
         g_hat = (R_align @ np.array([0.0, -1.0, 0.0], dtype=np.float32)).astype(np.float32)
         g_hat /= max(float(np.linalg.norm(g_hat)), 1e-8)
 
-        recess = max(r_eye * 0.14, 0.0025)
+        recess = max(r_eye * 0.04, 0.0008)
         eb_ctr = (surf - g_hat * (r_eye + recess)).astype(np.float32)
         carve_ctr = (surf - g_hat * (r_eye * 0.08)).astype(np.float32)
         excl_r = [
@@ -856,7 +860,7 @@ def build_creature_eyelid_shell(
         on_lid = in_ell & (dz >= z_min_curt)
         if np.any(on_lid):
             dx_c, dz_c = dx[on_lid], dz[on_lid]
-            curt_pts, curt_nrm = _to_world_pts_and_nrm(dx_c, dz_c, y_push=0.0045)
+            curt_pts, curt_nrm = _to_world_pts_and_nrm(dx_c, dz_c, y_push=0.0052)
             fur_c = np.asarray(fur_rgb, dtype=np.float32)
             if body_xyz is not None and body_rgb is not None and len(body_xyz) >= 50:
                 from scipy.spatial import cKDTree as _cKDTree
@@ -887,7 +891,7 @@ def build_creature_eyelid_shell(
     half_thick = max(rz * thick_scale, 0.0020) * taper
     dx_l = u_l * rx
     dz_l = (z_edge_base + arch_amp * (1.0 - u_l * u_l)) + v_l * half_thick
-    lash_pts, lash_nrm = _to_world_pts_and_nrm(dx_l, dz_l, y_push=0.0054 + 0.0010 * b_t)
+    lash_pts, lash_nrm = _to_world_pts_and_nrm(dx_l, dz_l, y_push=0.0060 + 0.0010 * b_t)
 
     # Sample local fur color right at the lash points so feather edges blend seamlessly into the face
     fur_c = np.asarray(fur_rgb, dtype=np.float32)
