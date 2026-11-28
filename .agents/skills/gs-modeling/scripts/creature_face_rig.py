@@ -536,7 +536,69 @@ def carve_creature_sockets(data: np.ndarray, face_meta: dict[str, Any]) -> np.nd
         is_iris_or_contour = (is_dark_contour | is_bright_iris) & below_brow
 
         keep &= ~(in_core | (in_outer & is_iris_or_contour))
-    return data[keep].copy()
+
+    out = data[keep].copy()
+
+    # 3) Soft halo fur-inpainting (recolor, NOT delete!) around each carved socket:
+    #    Eliminates leftover painterly eye-shadow / eyeliner halo splats without creating holes in the face,
+    #    while strictly preserving lower cheek blush and any forehead markings / eyebrows above dz_brow_floor!
+    from scipy.spatial import cKDTree as _cKDTree
+    xyz_o = np.column_stack([out["x"], out["y"], out["z"]]).astype(np.float32)
+    fdc_o = np.column_stack([out["f_dc_0"], out["f_dc_1"], out["f_dc_2"]]).astype(np.float32)
+    rgb_o = np.clip(0.5 + SH_C0 * fdc_o, 0.0, 1.0)
+    d_fur_o = np.linalg.norm(rgb_o - fur_rgb[None, :], axis=1)
+
+    for k in ("eye_L", "eye_R"):
+        em = face_meta[k]
+        cc = np.asarray(em["carve_center"], dtype=np.float32)
+        er = np.asarray(em["exclusion_radius"], dtype=np.float32)
+        has_brow = bool(em.get("has_brow", False))
+        r_eye = float(em.get("eyeball_radius", er[2] * 1.4))
+        dz_brow_floor = float(em.get("dz_brow_floor", er[2] * 1.50))
+
+        yaw_deg = float(em.get("cheek_yaw_deg", 0.0))
+        pitch_deg = float(em.get("cheek_pitch_deg", 0.0))
+        R_align = (
+            Rotation.from_euler("z", yaw_deg, degrees=True).as_matrix()
+            @ Rotation.from_euler("x", pitch_deg, degrees=True).as_matrix()
+        ).astype(np.float32)
+        loc = (xyz_o - cc[None, :]) @ R_align
+
+        z_halo = float(er[2] * 1.75) if has_brow else float(max(er[2] * 2.15, r_eye * 1.60))
+        r_halo = np.sqrt(
+            (loc[:, 0] / max(er[0] * 2.05, 1e-4)) ** 2
+            + (loc[:, 1] / max(er[1] * 1.65, 1e-4)) ** 2
+            + (loc[:, 2] / max(z_halo, 1e-4)) ** 2
+        )
+        # Soft radial, lower-cheek, and upper-brow weights
+        w_rad = _smoothstep(1.05, 0.62, r_halo)
+        w_low = _smoothstep(-er[2] * 1.15, -er[2] * 0.35, loc[:, 2])
+        w_top = _smoothstep(dz_brow_floor * 1.02, dz_brow_floor * 0.72, loc[:, 2])
+        w_col = _smoothstep(0.12, 0.24, d_fur_o)
+        alpha = (w_rad * w_low * w_top * w_col * 0.92).astype(np.float32)
+
+        m_blend = alpha > 0.03
+        if not np.any(m_blend):
+            continue
+
+        # Sample local surrounding bright fur color so lighting/shading matches the cheek seamlessly
+        m_local_fur = (d_fur_o < 0.20) & (np.linalg.norm(xyz_o - cc[None, :], axis=1) < max(er[0] * 3.5, 0.09))
+        if int(m_local_fur.sum()) >= 16:
+            tree = _cKDTree(xyz_o[m_local_fur])
+            _, nn = tree.query(xyz_o[m_blend], k=min(8, int(m_local_fur.sum())))
+            if nn.ndim == 1:
+                nn = nn[:, None]
+            target_rgb = np.median(rgb_o[m_local_fur][nn], axis=1).astype(np.float32)
+        else:
+            target_rgb = np.broadcast_to(fur_rgb[None, :], (int(m_blend.sum()), 3))
+
+        a_m = alpha[m_blend][:, None]
+        rgb_o[m_blend] = rgb_o[m_blend] * (1.0 - a_m) + target_rgb * a_m
+
+    out["f_dc_0"] = (rgb_o[:, 0] - 0.5) / SH_C0
+    out["f_dc_1"] = (rgb_o[:, 1] - 0.5) / SH_C0
+    out["f_dc_2"] = (rgb_o[:, 2] - 0.5) / SH_C0
+    return out
 
 
 def build_creature_eyeball(
@@ -722,22 +784,47 @@ def build_creature_eyelid_shell(
             else:
                 curt_rgb = np.broadcast_to(fur_c[None, :], (len(curt_pts), 3)).copy()
 
-    # Layer 2: Dedicated full-width dark upper eye-contour / lash ribbon (ALWAYS drawn when always_draw_lash=True!)
-    # Sits 1.8 mm proud of the fur curtain so the descending eye contour reads crisply at every blink phase (0 -> 1)!
-    n_u_lash, n_v_lash = 44, 5
+    # Layer 2: Soft-feathered full-width upper eye-contour / lash ribbon (ALWAYS drawn when always_draw_lash=True!)
+    # Feathers smoothly into surrounding fur along top/bottom edges & corners so it matches painterly/soft 3DGS styles!
+    n_u_lash, n_v_lash = 44, 7
     u_ln = np.linspace(-0.96, 0.96, n_u_lash, dtype=np.float32)
     v_ln = np.linspace(-1.0, 1.0, n_v_lash, dtype=np.float32)
     uu_l, vv_l = np.meshgrid(u_ln, v_ln)
     u_l = uu_l.ravel()
     v_l = vv_l.ravel()
-    # Taper ribbon slightly at inner/outer eye corners like a real illustrated upper lash contour
-    taper = np.sqrt(np.maximum(0.18, 1.0 - (u_l * 0.92) ** 2))
-    half_thick = max(rz * 0.14, 0.0024) * taper
+    # Taper ribbon smoothly at inner/outer eye corners; slightly slimmer when open, gently fuller when closed
+    taper = np.sqrt(np.maximum(0.15, 1.0 - (u_l * 0.94) ** 2))
+    thick_scale = 0.115 + 0.035 * b_t
+    half_thick = max(rz * thick_scale, 0.0020) * taper
     dx_l = u_l * rx
     dz_l = (z_edge_base + arch_amp * (1.0 - u_l * u_l)) + v_l * half_thick
-    lash_pts, lash_nrm = _to_world_pts_and_nrm(dx_l, dz_l, y_push=0.0063)
-    lash_c = np.clip(np.asarray(lash_rgb, dtype=np.float32) * 0.65, 0.04, 0.35)
-    lash_rgb_arr = np.broadcast_to(lash_c[None, :], (len(lash_pts), 3)).copy()
+    lash_pts, lash_nrm = _to_world_pts_and_nrm(dx_l, dz_l, y_push=0.0054 + 0.0010 * b_t)
+
+    # Sample local fur color right at the lash points so feather edges blend seamlessly into the face
+    fur_c = np.asarray(fur_rgb, dtype=np.float32)
+    if body_xyz is not None and body_rgb is not None and len(body_xyz) >= 50:
+        from scipy.spatial import cKDTree as _cKDTree
+        d_fur_l = np.linalg.norm(body_rgb - fur_c[None, :], axis=1)
+        m_fl = (d_fur_l < 0.24) & (np.linalg.norm(body_xyz - sc[None, :], axis=1) < max(rx * 2.5, 0.07))
+        if int(m_fl.sum()) >= 20:
+            tree_l = _cKDTree(body_xyz[m_fl])
+            _, nn_l = tree_l.query(lash_pts, k=min(8, int(m_fl.sum())))
+            if nn_l.ndim == 1:
+                nn_l = nn_l[:, None]
+            edge_fur_rgb = np.median(body_rgb[m_fl][nn_l], axis=1).astype(np.float32)
+        else:
+            edge_fur_rgb = np.broadcast_to(fur_c[None, :], (len(lash_pts), 3)).copy()
+    else:
+        edge_fur_rgb = np.broadcast_to(fur_c[None, :], (len(lash_pts), 3)).copy()
+
+    # Keep warm original contour tone when open; deepen gently when closed so the closed-eye arc reads clearly
+    lash_c = np.clip(np.asarray(lash_rgb, dtype=np.float32) * (0.92 - 0.22 * b_t), 0.06, 0.48)
+    w_v = np.exp(-(v_l / (0.62 + 0.14 * b_t)) ** 2)
+    w_u = _smoothstep(1.0, 0.68, np.abs(u_l))
+    w_lash = np.clip(w_v * (0.55 + 0.45 * w_u), 0.0, 1.0).astype(np.float32)
+    lash_rgb_arr = edge_fur_rgb * (1.0 - w_lash[:, None]) + lash_c[None, :] * w_lash[:, None]
+    # Soft opacity tapering on feather edges so the contour melts naturally into the face
+    lash_op = (1.6 + (3.0 + 0.9 * b_t) * w_lash).astype(np.float32)
 
     pts = np.concatenate([curt_pts, lash_pts], axis=0) if len(curt_pts) > 0 else lash_pts
     normals = np.concatenate([curt_nrm, lash_nrm], axis=0) if len(curt_nrm) > 0 else lash_nrm
@@ -747,18 +834,22 @@ def build_creature_eyelid_shell(
 
     rot = _normal_to_quat_wxyz(normals)
     s_curt = max(rx / 38.0 * 1.85, 0.0032)
-    s_lash = max(rx / n_u_lash * 1.75, 0.0024)
+    s_lash = max(rx / n_u_lash * 1.65, 0.0022)
     s_xy = np.concatenate([
         np.full(len(curt_pts), s_curt, dtype=np.float32),
         np.full(len(lash_pts), s_lash, dtype=np.float32),
     ]) if len(curt_pts) > 0 else np.full(len(lash_pts), s_lash, dtype=np.float32)
+    op_arr = np.concatenate([
+        np.full(len(curt_pts), 5.5, dtype=np.float32),
+        lash_op,
+    ]) if len(curt_pts) > 0 else lash_op
 
     out = np.zeros(len(pts), dtype=dtype)
     out["x"], out["y"], out["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
     out["f_dc_0"] = (rgb[:, 0] - 0.5) / SH_C0
     out["f_dc_1"] = (rgb[:, 1] - 0.5) / SH_C0
     out["f_dc_2"] = (rgb[:, 2] - 0.5) / SH_C0
-    out["opacity"] = 5.6
+    out["opacity"] = op_arr
     out["scale_0"] = np.log(s_xy)
     out["scale_1"] = np.log(s_xy)
     out["scale_2"] = np.log(s_xy * 0.30)
