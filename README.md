@@ -87,6 +87,24 @@ Separating **Frame** (multi-layer 3D walkable spans, stairs, overpasses, prop an
 </p>
 </details>
 
+### Asset Showcase: 5-Cut Cinematic Short Movie (`gs-modeling` + `gs-stage`)
+Combining assets built across the pipeline — rigged `hood-01` (with eye blink, gaze, and Harmonic DQS posing), antique brass cage `cage-01` (`v1_prop/`) with a procedural luminous white butterfly fluttering inside, and the 2-story mossy forest ruins (`gs-stage`) with 1.5× SSAA (`1920×1080 → 720p`), screen-space butterfly relighting, warm distant arch light, and 12 drifting 3D fireflies — produces a 16.5-second 5-cut short film purely from local 3DGS assets:
+
+> **[▶ Watch Full 720p 24fps HD Short Movie (Browser Player)](https://fistacb.github.io/gs-modelflows/demo/movie.html)**
+
+<p align="center">
+  <a href="https://fistacb.github.io/gs-modelflows/demo/movie.html">
+    <img src="docs/assets/showcase/15_short_movie_midnight_arch.gif" width="680" alt="5-cut 3DGS short movie preview: hood-01 holding a glowing white butterfly lantern approaching a moonlit mossy stone arch" />
+  </a>
+</p>
+
+<details>
+<summary>View 5-cut HD storyboard digest (<code>15_short_movie_midnight_arch_5cuts.jpg</code>)</summary>
+<p align="center">
+  <img src="docs/assets/showcase/15_short_movie_midnight_arch_5cuts.jpg" width="760" alt="5-cut HD storyboard digest of Beyond the Midnight Arch" />
+</p>
+</details>
+
 ### Example Agent Prompts (How to Use)
 Once installed in **Antigravity**, **Claude Code**, or **Codex**, just attach a 2D character image and ask naturally:
 

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Beyond the Midnight Arch | gs-modelflows 3DGS Short Movie</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; min-height: 100dvh;
+    background: #070b14; color: #eef2f8;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 20px 14px;
+  }
+  .wrap { width: 100%; max-width: 960px; display: flex; flex-direction: column; gap: 14px; }
+  .head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 10px; }
+  h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0.02em; }
+  .sub { font-size: 12px; color: #98a4b8; }
+  .links { display: flex; gap: 12px; font-size: 13px; }
+  a { color: #8ab4f8; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  video {
+    width: 100%; border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.14);
+    box-shadow: 0 20px 56px rgba(0,0,0,0.65);
+    background: #000;
+  }
+  .note {
+    font-size: 13px; color: #b5c0d4; line-height: 1.6;
+    background: rgba(18, 24, 36, 0.8);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px; padding: 12px 14px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1>Beyond the Midnight Arch — 3DGS Short Movie</h1>
+      <div class="sub">1280×720 (1.5× SSAA) · 24fps · 16.5s · 5 Cuts · Spark GPU + Real-Time 3D Relighting</div>
+    </div>
+    <div class="links">
+      <a href="./">▶ Interactive WebGL2 Demo</a>
+      <a href="https://github.com/fistacb/gs-modelflows" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </div>
+  <video controls playsinline autoplay loop muted preload="metadata" poster="../assets/showcase/15_short_movie_midnight_arch_5cuts.jpg">
+    <source src="assets/hood01_midnight_arch_short_720p_clean.mp4" type="video/mp4" />
+  </video>
+  <div class="note">
+    Built end-to-end by combining assets from <code>gs-modeling</code> (rigged <code>hood-01</code> character + brass lantern cage <code>cage-01</code> + procedural glowing white butterfly) and <code>gs-stage</code> (2-story mossy stone ruins + 3D Position/Normal relighting + 12 drifting 3D firefly micro-lights).
+  </div>
+</div>
+</body>
+</html>

@@ -88,6 +88,24 @@
 </p>
 </details>
 
+### アセット活用例：全 5 カット 3DGS ショートムービー（`gs-modeling` ＋ `gs-stage`）
+本パイプラインで作ったアセット群 — リグ済みキャラ `hood-01`（まばたき・視線・Harmonic DQS 演技）、アンティーク真鍮ケージ `cage-01`（`v1_prop/`）の中で羽ばたくプロシージャルな白い光るちょうちょ、2 層苔むした森の遺跡（`gs-stage`）— を組み合わせ、**1.5× SSAA（1920×1080 → 720p 縮小）・オーロラ方式クリーンリライティング・石アーチ奥の暖色光源・12 匹の 3D 移動ホタル**で撮影した 16.5 秒のショートムービーです：
+
+> **[▶ 720p / 24fps 高精細フル版をブラウザで再生する（GitHub Pages）](https://fistacb.github.io/gs-modelflows/demo/movie.html)**
+
+<p align="center">
+  <a href="https://fistacb.github.io/gs-modelflows/demo/movie.html">
+    <img src="docs/assets/showcase/15_short_movie_midnight_arch.gif" width="680" alt="全5カット 3DGS ショートムービー『夜の石アーチの向こう』プレビュー" />
+  </a>
+</p>
+
+<details>
+<summary>全 5 カット HD ダイジェスト静止画を見る（<code>15_short_movie_midnight_arch_5cuts.jpg</code>）</summary>
+<p align="center">
+  <img src="docs/assets/showcase/15_short_movie_midnight_arch_5cuts.jpg" width="760" alt="全5カット HD ダイジェスト静止画" />
+</p>
+</details>
+
 ### エージェントへの指示例（使い方イメージ）
 **Antigravity** / **Claude Code** / **Codex** にスキルを導入した状態で、2D 画像を添付して自然言語で依頼するだけで実行できます：
 
