@@ -382,16 +382,44 @@ def fit_creature_face(
 
 
 def carve_creature_sockets(data: np.ndarray, face_meta: dict[str, Any]) -> np.ndarray:
-    """Remove original painted eye splats inside the L/R socket exclusion ellipsoids."""
+    """Color-guided socket carving: removes original painted iris/sclera splats while
+    strictly preserving surrounding face fur and dark upper-eyelash contour lines!
+    """
     xyz = np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float32)
+    fdc = np.column_stack([data["f_dc_0"], data["f_dc_1"], data["f_dc_2"]]).astype(np.float32)
+    rgb = np.clip(0.5 + SH_C0 * fdc, 0.0, 1.0)
+    fur_rgb = np.asarray(face_meta.get("fur_rgb", [0.92, 0.84, 0.78]), dtype=np.float32)
+    d_fur = np.linalg.norm(rgb - fur_rgb[None, :], axis=1)
+    sat = rgb.max(axis=1) - rgb.min(axis=1)
+    lum = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
+
     keep = np.ones(len(data), dtype=bool)
     for k in ("eye_L", "eye_R"):
         em = face_meta[k]
         cc = np.asarray(em["carve_center"], dtype=np.float32)
         er = np.asarray(em["exclusion_radius"], dtype=np.float32)
-        rel = (xyz - cc[None, :]) / np.maximum(er[None, :], 1e-4)
-        inside = np.sum(rel * rel, axis=1) < 1.0
-        keep &= ~inside
+
+        # Rotate into the eye's local cheek frame so the carving ellipsoid aligns with angled animal cheeks
+        yaw_deg = float(em.get("cheek_yaw_deg", 0.0))
+        pitch_deg = float(em.get("cheek_pitch_deg", 0.0))
+        R_align = (
+            Rotation.from_euler("z", yaw_deg, degrees=True).as_matrix()
+            @ Rotation.from_euler("x", pitch_deg, degrees=True).as_matrix()
+        ).astype(np.float32)
+        loc = (xyz - cc[None, :]) @ R_align  # local X=width, Y=depth, Z=height
+
+        # 1) Tight inner pupil/iris core (unconditional carve)
+        rel_core = loc / np.maximum(er[None, :] * np.array([[0.78, 1.0, 0.72]], dtype=np.float32), 1e-4)
+        in_core = np.sum(rel_core * rel_core, axis=1) < 1.0
+
+        # 2) Outer iris ring: selectively remove remaining chromatic iris splats ONLY,
+        # preserving face fur (d_fur <= 0.24) and dark upper-eyelash line (lum <= 0.20 at top)!
+        rel_outer = loc / np.maximum(er[None, :] * np.array([[1.48, 1.25, 1.55]], dtype=np.float32), 1e-4)
+        in_outer = np.sum(rel_outer * rel_outer, axis=1) < 1.0
+        is_dark_upper_lash = (loc[:, 2] > er[2] * 0.45) & (lum < 0.24)
+        is_iris_remnant = (d_fur > 0.24) & (sat > 0.28) & (lum < 0.76) & (~is_dark_upper_lash)
+
+        keep &= ~(in_core | (in_outer & is_iris_remnant))
     return data[keep].copy()
 
 
@@ -493,33 +521,40 @@ def build_creature_eyelid_shell(
     blink: float,
     dtype: np.dtype,
 ) -> np.ndarray:
-    """Generate a curved creature eyelid curtain + arched lash line flush with the local face quad."""
+    """Generate a curved creature eyelid curtain + arched lash line aligned to the eye's local cheek frame."""
     if blink <= 0.02:
         return np.zeros(0, dtype=dtype)
 
     sc = np.asarray(eye_meta["surface_center"], dtype=np.float32)
-    c0, c1, c2, c3, c4, c5 = [float(v) for v in eye_meta["face_quad_coef"]]
-    er = eye_meta["exclusion_radius"]
-    rx = float(er[0]) * 0.98
-    rz = float(er[2]) * 0.96
+    r_eye = float(eye_meta["eyeball_radius"])
+    yaw_deg = float(eye_meta.get("cheek_yaw_deg", 0.0))
+    pitch_deg = float(eye_meta.get("cheek_pitch_deg", 0.0))
+    R_align = (
+        Rotation.from_euler("z", yaw_deg, degrees=True).as_matrix()
+        @ Rotation.from_euler("x", pitch_deg, degrees=True).as_matrix()
+    ).astype(np.float32)
 
-    # Grid across the eye opening; eyelid curtain descends from +rz down to z_edge as blink goes 0 -> 1
-    z_top = rz * 1.02
-    z_bot = -rz * 1.02
+    er = eye_meta["exclusion_radius"]
+    rx = float(er[0]) * 1.05
+    rz = float(er[2]) * 1.08
+
+    # Grid in the eye's local tangent frame (dx, dz); curtain descends from +rz down to z_edge as blink 0 -> 1
+    z_top = rz * 1.00
+    z_bot = -rz * 1.05
     z_edge = z_top - float(np.clip(blink, 0.0, 1.0)) * (z_top - z_bot)
 
-    nu, nv = 34, 26
+    nu, nv = 34, 24
     us = np.linspace(-rx, rx, nu, dtype=np.float32)
     vs = np.linspace(z_bot, z_top, nv, dtype=np.float32)
     uu, vv = np.meshgrid(us, vs)
     dx = uu.ravel()
     dz = vv.ravel()
 
-    # Elliptical eye aperture + curved upper lash arch
-    in_ell = (dx / rx) ** 2 + (dz / rz) ** 2 <= 1.04
-    arch = 0.22 * rz * (1.0 - (dx / rx) ** 2) * (1.0 - 0.75 * float(blink))
+    # Almond eye aperture + gentle lash arch
+    in_ell = (dx / rx) ** 2 + (dz / rz) ** 2 <= 1.02
+    arch = 0.18 * rz * (1.0 - (dx / rx) ** 2) * (1.0 - 0.80 * float(blink))
     z_cur_edge = z_edge + arch
-    on_lid = in_ell & (dz >= z_cur_edge - 0.16 * rz)
+    on_lid = in_ell & (dz >= z_cur_edge - 0.18 * rz)
     if not np.any(on_lid):
         return np.zeros(0, dtype=dtype)
 
@@ -527,34 +562,36 @@ def build_creature_eyelid_shell(
     dz = dz[on_lid]
     z_cur_edge = z_cur_edge[on_lid]
 
-    # Evaluate local face quad y(dx, dz) and step 1.5 mm outward (-Y) so eyelid cleanly covers eyeball
-    y_surf = c0 + c1 * dx + c2 * dz + c3 * dx * dx + c4 * dx * dz + c5 * dz * dz - 0.0022
-    pts = np.column_stack([sc[0] + dx, y_surf, sc[2] + dz]).astype(np.float32)
+    # Gentle spherical wrap around the eyeball front cap (sits ~1.5 mm in front of iris, never protruding!)
+    r_wrap = max(r_eye * 1.06, 0.020)
+    rad_sq = np.maximum(r_wrap * r_wrap - dx * dx - dz * dz, (r_wrap * 0.35) ** 2)
+    dy_local = (r_wrap - np.sqrt(rad_sq)) - 0.0018  # slightly recessed at edges, 1.8 mm ahead at pole
+    loc_pts = np.column_stack([dx, dy_local, dz]).astype(np.float32)
+    pts = sc[None, :] + (loc_pts @ R_align.T)
 
     # Color: face fur on upper curtain, gentle dark lash stroke along the descending lower rim
     dist_to_edge = np.abs(dz - z_cur_edge)
-    lash_thick = max(rz * 0.22, 0.0026)
+    lash_thick = max(rz * 0.22, 0.0024)
     is_lash = _smoothstep(lash_thick, lash_thick * 0.35, dist_to_edge)
     fur_c = np.asarray(fur_rgb, dtype=np.float32)
     lash_c = np.asarray(lash_rgb, dtype=np.float32)
     rgb = fur_c[None, :] * (1.0 - is_lash[:, None]) + lash_c[None, :] * is_lash[:, None]
 
-    # Surface normals from quad gradient
-    nx = c1 + 2.0 * c3 * dx + c4 * dz
-    nz = c2 + c4 * dx + 2.0 * c5 * dz
-    normals = np.column_stack([nx, np.full_like(nx, -1.0), nz]).astype(np.float32)
+    # Outward normals on the spherical wrap rotated into world space
+    loc_nrm = np.column_stack([dx / r_wrap, -np.sqrt(rad_sq) / r_wrap, dz / r_wrap]).astype(np.float32)
+    normals = (loc_nrm @ R_align.T).astype(np.float32)
     rot = _normal_to_quat_wxyz(normals)
 
-    s_xy = max(rx / nu * 1.45, 0.0028)
+    s_xy = max(rx / nu * 1.45, 0.0024)
     out = np.zeros(len(pts), dtype=dtype)
     out["x"], out["y"], out["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
     out["f_dc_0"] = (rgb[:, 0] - 0.5) / SH_C0
     out["f_dc_1"] = (rgb[:, 1] - 0.5) / SH_C0
     out["f_dc_2"] = (rgb[:, 2] - 0.5) / SH_C0
-    out["opacity"] = 4.5
+    out["opacity"] = 4.6
     out["scale_0"] = math.log(s_xy)
     out["scale_1"] = math.log(s_xy)
-    out["scale_2"] = math.log(s_xy * 0.28)
+    out["scale_2"] = math.log(s_xy * 0.25)
     out["rot_0"], out["rot_1"], out["rot_2"], out["rot_3"] = rot[:, 0], rot[:, 1], rot[:, 2], rot[:, 3]
     return out
 
