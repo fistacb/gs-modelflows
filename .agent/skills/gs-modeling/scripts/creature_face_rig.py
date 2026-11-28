@@ -313,14 +313,42 @@ def fit_creature_face(
     }
 
     eye_metas: dict[str, dict] = {}
-    for side, pts_s in (("eye_L", pts_L), ("eye_R", pts_R)):
-        p10, p50, p90 = np.percentile(pts_s, [10, 50, 90], axis=0)
-        span = p90 - p10
-        # Anchor depth strictly on the actual eye surface Y (prevents protruding muzzle from pulling eye Y forward!)
-        y_eye_actual = float(np.percentile(pts_s[:, 1], 45))
-        surf = np.array([float(p50[0]), y_eye_actual, float(0.5 * (p10[2] + p90[2]))], dtype=np.float32)
+    eye_raw_surfs: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for side, pts_s, col_s in (("eye_L", pts_L, col_L), ("eye_R", pts_R, col_R)):
+        # Include BOTH dark upper iris/pupil AND bright colored lower iris (lum < 0.64),
+        # while rejecting pale cheek blush so the center never shifts upward into the upper lash!
+        lum_s = 0.299 * col_s[:, 0] + 0.587 * col_s[:, 1] + 0.114 * col_s[:, 2]
+        m_iris_s = lum_s < 0.64
+        pts_core = pts_s[m_iris_s] if int(m_iris_s.sum()) >= 12 else pts_s
 
-        r_eye = float(np.clip(0.42 * max(float(span[0]), float(span[2])), 0.015, 0.025))
+        p10, p50, p90 = np.percentile(pts_core, [10, 50, 90], axis=0)
+        span = p90 - p10
+        y_eye_actual = float(np.percentile(pts_core[:, 1], 42))
+        surf = np.array([
+            float(0.5 * (p10[0] + p90[0])),
+            y_eye_actual,
+            float(0.5 * (p10[2] + p90[2])),
+        ], dtype=np.float32)
+        eye_raw_surfs[side] = (surf, span, pts_core)
+
+    # Bilateral eye-height consistency: prevent asymmetric dark upper lash on one side from pulling
+    # one eye center abnormally higher than the other (allows natural head tilt up to 0.045 * D_eye)
+    d_eye_est = float(np.linalg.norm(eye_raw_surfs["eye_L"][0] - eye_raw_surfs["eye_R"][0]))
+    max_dz_asym = max(0.045 * d_eye_est, 0.006)
+    zL = float(eye_raw_surfs["eye_L"][0][2])
+    zR = float(eye_raw_surfs["eye_R"][0][2])
+    if abs(zL - zR) > max_dz_asym:
+        # Pull the higher eye down toward the lower (less lash-biased) eye
+        if zL > zR:
+            eye_raw_surfs["eye_L"][0][2] = zR + max_dz_asym
+        else:
+            eye_raw_surfs["eye_R"][0][2] = zL + max_dz_asym
+
+    for side, pts_s, col_s in (("eye_L", pts_L, col_L), ("eye_R", pts_R, col_R)):
+        surf, span, pts_core = eye_raw_surfs[side]
+        y_eye_actual = float(surf[1])
+
+        r_eye = float(np.clip(0.44 * max(float(span[0]), float(span[2])), 0.016, 0.026))
         fit = _fit_local_face_quad(xyz, fur_mask, surf, r_eye, max_yaw_deg=26.0)
         # Clamp fitted quad surface Y within +/-2mm of actual eye surface so muzzle NEVER pulls eyeballs out!
         fitted_y = float(np.clip(fit["skin_surface_y"], y_eye_actual - 0.002, y_eye_actual + 0.002))
@@ -343,8 +371,12 @@ def fit_creature_face(
 
         recess = max(r_eye * 0.14, 0.0025)
         eb_ctr = (surf - g_hat * (r_eye + recess)).astype(np.float32)
-        carve_ctr = (surf - g_hat * (r_eye * 0.10)).astype(np.float32)
-        excl_r = [float(max(span[0] * 0.44, r_eye * 0.74)), float(r_eye * 1.05), float(max(span[2] * 0.36, r_eye * 0.50))]
+        carve_ctr = (surf - g_hat * (r_eye * 0.08)).astype(np.float32)
+        excl_r = [
+            float(max(span[0] * 0.48, r_eye * 0.85)),
+            float(r_eye * 1.15),
+            float(max(span[2] * 0.48, r_eye * 0.62)),
+        ]
 
         meta_s = {
             "detected_iris_points": int(len(pts_s)),
@@ -490,15 +522,18 @@ def carve_creature_sockets(data: np.ndarray, face_meta: dict[str, Any]) -> np.nd
 
         # 2) Outer iris + upper eye-contour ring: remove remaining iris AND the static upper eye-contour
         #    (below dz_brow_floor) so the dynamic eyelid moves the contour itself when blinking!
-        #    Face fur (d_fur <= 0.24) and any detected eyebrow above dz_brow_floor are strictly preserved!
+        #    Face fur (d_fur <= 0.24), cheek blush below eye, and any detected eyebrow above dz_brow_floor are preserved!
         has_brow = bool(em.get("has_brow", False))
         r_eye = float(em.get("eyeball_radius", er[2] * 1.4))
         dz_brow_floor = float(em.get("dz_brow_floor", er[2] * 1.50))
-        z_outer = float(er[2] * 1.65) if has_brow else float(max(er[2] * 2.05, r_eye * 1.55))
-        rel_outer = loc / np.maximum(np.array([[er[0] * 1.52, er[1] * 1.25, z_outer]], dtype=np.float32), 1e-4)
+        z_outer = float(er[2] * 1.65) if has_brow else float(max(er[2] * 2.15, r_eye * 1.65))
+        rel_outer = loc / np.maximum(np.array([[er[0] * 1.72, er[1] * 1.45, z_outer]], dtype=np.float32), 1e-4)
         in_outer = np.sum(rel_outer * rel_outer, axis=1) < 1.0
         below_brow = loc[:, 2] <= dz_brow_floor
-        is_iris_or_contour = (d_fur > 0.24) & ((sat > 0.26) | (lum < 0.42)) & (lum < 0.78) & below_brow
+        # Preserve light orange cheek blush below eye (only carve bright saturated iris inside tighter lower bound)
+        is_dark_contour = (lum < 0.46) & (d_fur > 0.22)
+        is_bright_iris = (d_fur > 0.28) & (sat > 0.30) & (lum < 0.78) & (loc[:, 2] >= -er[2] * 1.10) & (np.abs(loc[:, 0]) <= er[0] * 1.25)
+        is_iris_or_contour = (is_dark_contour | is_bright_iris) & below_brow
 
         keep &= ~(in_core | (in_outer & is_iris_or_contour))
     return data[keep].copy()
@@ -624,80 +659,109 @@ def build_creature_eyelid_shell(
     ).astype(np.float32)
 
     er = eye_meta["exclusion_radius"]
-    rx = float(er[0]) * 1.24
-    rz = float(er[2]) * 1.25
+    rx = float(er[0]) * 1.22
+    rz = float(er[2]) * 1.22
     dz_brow_floor = float(eye_meta.get("dz_brow_floor", rz * 1.35))
+    b_t = float(np.clip(blink, 0.0, 1.0))
 
-    # Curtain descends from z_top down to z_bot as blink goes 0 -> 1 (clipped strictly below eyebrow!)
-    z_top = min(rz * 1.15, dz_brow_floor)
-    z_bot = -rz * 0.95
-    z_edge = z_top - float(np.clip(blink, 0.0, 1.0)) * (z_top - z_bot)
+    # Eyelid contour curve z_lash(u_norm) across the FULL width of the eye:
+    # - At blink=0.0: sits right on the upper eye contour rim (+0.68*rz at center, gently curving down at corners)
+    # - At blink=1.0: descends cleanly to the lower-mid closed-eye crease (-0.38*rz) with a gentle closed-eye arc
+    #   so the contour NEVER gets clipped by the bottom ellipse or buried behind lower cheek fur!
+    z_top = min(rz * 1.18, dz_brow_floor)
+    z_open_edge = min(rz * 0.84, z_top - rz * 0.06)
+    z_closed_edge = -rz * 0.34
+    z_edge_base = z_open_edge - b_t * (z_open_edge - z_closed_edge)
+    arch_amp = rz * (0.24 * (1.0 - b_t) - 0.14 * b_t)  # arches UP when open, gently curves into closed smile arc when shut
 
-    nu, nv = 38, 28
-    us = np.linspace(-rx, rx, nu, dtype=np.float32)
-    vs = np.linspace(z_bot, z_top, nv, dtype=np.float32)
-    uu, vv = np.meshgrid(us, vs)
-    dx = uu.ravel()
-    dz = vv.ravel()
+    # Wrap radius slightly larger than eyeball so eyelid sits cleanly flush over the socket
+    r_wrap = max(r_eye * 1.12, 0.022)
 
-    # Smooth almond eye aperture + gentle smile-like closed lash arch
-    in_ell = (dx / rx) ** 2 + (dz / rz) ** 2 <= 1.02
-    arch = 0.22 * rz * (1.0 - (dx / rx) ** 2) * (1.0 - 0.65 * float(blink))
-    z_cur_edge = z_edge + arch
-    on_lid = in_ell & (dz >= z_cur_edge - 0.16 * rz)
-    if not np.any(on_lid):
+    def _to_world_pts_and_nrm(lx: np.ndarray, lz: np.ndarray, y_push: float) -> tuple[np.ndarray, np.ndarray]:
+        rad_sq = np.maximum(r_wrap * r_wrap - lx * lx - lz * lz, (r_wrap * 0.42) ** 2)
+        dy_local = (r_wrap - np.sqrt(rad_sq)) - y_push
+        loc_p = np.column_stack([lx, dy_local, lz]).astype(np.float32)
+        w_pts = sc[None, :] + (loc_p @ R_align.T)
+        loc_n = np.column_stack([lx / r_wrap, -np.sqrt(rad_sq) / r_wrap, lz / r_wrap]).astype(np.float32)
+        w_nrm = (loc_n @ R_align.T).astype(np.float32)
+        return w_pts, w_nrm
+
+    # Layer 1: Solid fur-matched eyelid curtain (covers eyeball above the descending lash contour)
+    curt_pts = np.zeros((0, 3), dtype=np.float32)
+    curt_nrm = np.zeros((0, 3), dtype=np.float32)
+    curt_rgb = np.zeros((0, 3), dtype=np.float32)
+    if b_t > 0.04:
+        nu, nv = 38, 28
+        us = np.linspace(-rx, rx, nu, dtype=np.float32)
+        vs = np.linspace(-rz * 1.05, z_top, nv, dtype=np.float32)
+        uu, vv = np.meshgrid(us, vs)
+        dx = uu.ravel()
+        dz = vv.ravel()
+        u_n = dx / max(rx, 1e-5)
+        z_curve = z_edge_base + arch_amp * (1.0 - u_n * u_n)
+        in_ell = (dx / rx) ** 2 + (dz / (rz * 1.08)) ** 2 <= 1.04
+        # At blink >= 0.85, fill all the way down to -rz*0.92 below the crease too so lower sclera never peeks out!
+        z_min_curt = z_curve if b_t < 0.82 else np.minimum(z_curve, -rz * 0.88 * np.sqrt(np.maximum(0.0, 1.0 - u_n * u_n)))
+        on_lid = in_ell & (dz >= z_min_curt)
+        if np.any(on_lid):
+            dx_c, dz_c = dx[on_lid], dz[on_lid]
+            curt_pts, curt_nrm = _to_world_pts_and_nrm(dx_c, dz_c, y_push=0.0045)
+            fur_c = np.asarray(fur_rgb, dtype=np.float32)
+            if body_xyz is not None and body_rgb is not None and len(body_xyz) >= 50:
+                from scipy.spatial import cKDTree as _cKDTree
+                d_fur = np.linalg.norm(body_rgb - fur_c[None, :], axis=1)
+                m_f = (d_fur < 0.24) & (np.linalg.norm(body_xyz - sc[None, :], axis=1) < max(rx * 2.5, 0.07))
+                if int(m_f.sum()) >= 20:
+                    tree = _cKDTree(body_xyz[m_f])
+                    _, nn = tree.query(curt_pts, k=min(8, int(m_f.sum())))
+                    if nn.ndim == 1:
+                        nn = nn[:, None]
+                    curt_rgb = np.median(body_rgb[m_f][nn], axis=1).astype(np.float32)
+                else:
+                    curt_rgb = np.broadcast_to(fur_c[None, :], (len(curt_pts), 3)).copy()
+            else:
+                curt_rgb = np.broadcast_to(fur_c[None, :], (len(curt_pts), 3)).copy()
+
+    # Layer 2: Dedicated full-width dark upper eye-contour / lash ribbon (ALWAYS drawn when always_draw_lash=True!)
+    # Sits 1.8 mm proud of the fur curtain so the descending eye contour reads crisply at every blink phase (0 -> 1)!
+    n_u_lash, n_v_lash = 44, 5
+    u_ln = np.linspace(-0.96, 0.96, n_u_lash, dtype=np.float32)
+    v_ln = np.linspace(-1.0, 1.0, n_v_lash, dtype=np.float32)
+    uu_l, vv_l = np.meshgrid(u_ln, v_ln)
+    u_l = uu_l.ravel()
+    v_l = vv_l.ravel()
+    # Taper ribbon slightly at inner/outer eye corners like a real illustrated upper lash contour
+    taper = np.sqrt(np.maximum(0.18, 1.0 - (u_l * 0.92) ** 2))
+    half_thick = max(rz * 0.14, 0.0024) * taper
+    dx_l = u_l * rx
+    dz_l = (z_edge_base + arch_amp * (1.0 - u_l * u_l)) + v_l * half_thick
+    lash_pts, lash_nrm = _to_world_pts_and_nrm(dx_l, dz_l, y_push=0.0063)
+    lash_c = np.clip(np.asarray(lash_rgb, dtype=np.float32) * 0.65, 0.04, 0.35)
+    lash_rgb_arr = np.broadcast_to(lash_c[None, :], (len(lash_pts), 3)).copy()
+
+    pts = np.concatenate([curt_pts, lash_pts], axis=0) if len(curt_pts) > 0 else lash_pts
+    normals = np.concatenate([curt_nrm, lash_nrm], axis=0) if len(curt_nrm) > 0 else lash_nrm
+    rgb = np.concatenate([curt_rgb, lash_rgb_arr], axis=0) if len(curt_rgb) > 0 else lash_rgb_arr
+    if len(pts) == 0:
         return np.zeros(0, dtype=dtype)
 
-    dx = dx[on_lid]
-    dz = dz[on_lid]
-    z_cur_edge = z_cur_edge[on_lid]
-
-    # Gentle spherical wrap sitting flush right over the socket opening (clears static upper lash line!)
-    r_wrap = max(r_eye * 1.10, 0.022)
-    rad_sq = np.maximum(r_wrap * r_wrap - dx * dx - dz * dz, (r_wrap * 0.35) ** 2)
-    dy_local = (r_wrap - np.sqrt(rad_sq)) - 0.0045
-    loc_pts = np.column_stack([dx, dy_local, dz]).astype(np.float32)
-    pts = sc[None, :] + (loc_pts @ R_align.T)
-
-    # Sample bright fur color locally around the eye border so eyelid matches surrounding cheek/brow shading
-    fur_c = np.asarray(fur_rgb, dtype=np.float32)
-    if body_xyz is not None and body_rgb is not None and len(body_xyz) >= 50:
-        from scipy.spatial import cKDTree as _cKDTree
-        d_fur = np.linalg.norm(body_rgb - fur_c[None, :], axis=1)
-        m_f = (d_fur < 0.24) & (np.linalg.norm(body_xyz - sc[None, :], axis=1) < max(rx * 2.5, 0.07))
-        if int(m_f.sum()) >= 20:
-            tree = _cKDTree(body_xyz[m_f])
-            _, nn = tree.query(pts, k=min(8, int(m_f.sum())))
-            if nn.ndim == 1:
-                nn = nn[:, None]
-            curtain_rgb = np.median(body_rgb[m_f][nn], axis=1).astype(np.float32)
-        else:
-            curtain_rgb = np.broadcast_to(fur_c[None, :], (len(pts), 3)).copy()
-    else:
-        curtain_rgb = np.broadcast_to(fur_c[None, :], (len(pts), 3)).copy()
-
-    # Crisp dark lash stroke along the descending lower rim (thicker & cleaner so it reads clearly as closed eye)
-    dist_to_edge = np.abs(dz - z_cur_edge)
-    lash_thick = max(rz * 0.16, 0.0026)
-    is_lash = _smoothstep(lash_thick, lash_thick * 0.30, dist_to_edge)
-    lash_c = np.asarray(lash_rgb, dtype=np.float32) * 0.72
-    rgb = curtain_rgb * (1.0 - is_lash[:, None]) + lash_c[None, :] * is_lash[:, None]
-
-    loc_nrm = np.column_stack([dx / r_wrap, -np.sqrt(rad_sq) / r_wrap, dz / r_wrap]).astype(np.float32)
-    normals = (loc_nrm @ R_align.T).astype(np.float32)
     rot = _normal_to_quat_wxyz(normals)
+    s_curt = max(rx / 38.0 * 1.85, 0.0032)
+    s_lash = max(rx / n_u_lash * 1.75, 0.0024)
+    s_xy = np.concatenate([
+        np.full(len(curt_pts), s_curt, dtype=np.float32),
+        np.full(len(lash_pts), s_lash, dtype=np.float32),
+    ]) if len(curt_pts) > 0 else np.full(len(lash_pts), s_lash, dtype=np.float32)
 
-    # Slightly fuller splats + high opacity so the eyelid is 100% solid (never thin/translucent)
-    s_xy = max(rx / nu * 1.75, 0.0030)
     out = np.zeros(len(pts), dtype=dtype)
     out["x"], out["y"], out["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
     out["f_dc_0"] = (rgb[:, 0] - 0.5) / SH_C0
     out["f_dc_1"] = (rgb[:, 1] - 0.5) / SH_C0
     out["f_dc_2"] = (rgb[:, 2] - 0.5) / SH_C0
-    out["opacity"] = 5.5
-    out["scale_0"] = math.log(s_xy)
-    out["scale_1"] = math.log(s_xy)
-    out["scale_2"] = math.log(s_xy * 0.30)
+    out["opacity"] = 5.6
+    out["scale_0"] = np.log(s_xy)
+    out["scale_1"] = np.log(s_xy)
+    out["scale_2"] = np.log(s_xy * 0.30)
     out["rot_0"], out["rot_1"], out["rot_2"], out["rot_3"] = rot[:, 0], rot[:, 1], rot[:, 2], rot[:, 3]
     return out
 
