@@ -680,24 +680,37 @@ def add_tail_bones(
         "inertia": 0.52,
         "max_angle_deg": 11.0,
     }
-    tail_rbox = None
+    # Keep tail away from hind paws at lower Z while allowing smooth pelvis -> tail_1 harmonic transition!
+    tail_seam = None
     if "hind_paw_L" in bones and "hind_paw_R" in bones:
-        y_tail_floor = max(float(bones["hind_paw_L"]["head"][1]), float(bones["hind_paw_R"]["head"][1])) + 0.03
-        tail_rbox = {"min": [-10.0, y_tail_floor, -10.0], "max": [10.0, 10.0, 10.0]}
+        y_tail_floor = max(float(bones["hind_paw_L"]["head"][1]), float(bones["hind_paw_R"]["head"][1])) + 0.04
+        z_pelvis_ref = float(p_pelvis[2])
+        tail_seam = {
+            "origin": [mid_x, y_tail_floor, z_pelvis_ref * 0.45],
+            "normal": [0.0, 1.0, 0.0],  # +Y = tail, -Y = hind legs
+            "bbox_min": [-10.0, y_tail_floor - 0.12, -10.0],
+            "bbox_max": [10.0, y_tail_floor + 0.12, z_pelvis_ref - 0.06],
+            "keep_side": +1.0,
+            "affect_parent": False,
+        }
 
-    return add_chain(
+    created = add_chain(
         bones,
         "tail",
         parent,
         chain_pts,
         skin_group="tail",
         role="tail",
+        pin_radius=0.022,
         influence_radius_scale=1.35,
-        region_box=tail_rbox,
-        limits_deg={"x": [-12, 38], "y": [-18, 18], "z": [-28, 28]},
+        limits_deg={"x": [-12, 32], "y": [-18, 18], "z": [-28, 28]},
         dynamics=dyn,
         dynamics_tip_boost=1.25,
     )
+    if tail_seam is not None:
+        for bn in created:
+            bones[bn]["seam_cut"] = tail_seam
+    return created
 
 
 def add_ear_bones(

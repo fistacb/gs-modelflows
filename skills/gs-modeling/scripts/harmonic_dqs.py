@@ -651,6 +651,56 @@ def deform_dqs(
     return out_xyz, out_rot
 
 
+def densify_deforming_region(
+    data: np.ndarray,
+    skin_bones: list[str],
+    W: np.ndarray,
+    bone_prefixes: tuple[str, ...] = ("tail_",),
+    min_weight: float = 0.25,
+    max_new: int = 12000,
+    max_edge: float = 0.024,
+) -> np.ndarray:
+    """Pre-densify high-flex 3DGS regions (e.g. fluffy tails, cloth roots) by inserting
+    color-interpolated midpoint splats along local kNN edges so GPU skinning never thins out when bent.
+    """
+    b_idxs = [i for i, b in enumerate(skin_bones) if b.startswith(bone_prefixes)]
+    if not b_idxs:
+        return data
+    w_reg = W[:, b_idxs].sum(axis=1)
+    # Include both interior of the region and the root transition band (where stretch is highest)
+    reg_idx = np.where(w_reg >= min_weight)[0]
+    if len(reg_idx) < 30:
+        return data
+
+    xyz = np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float32)
+    rxyz = xyz[reg_idx]
+    tree = cKDTree(rxyz)
+    dists, nbrs = tree.query(rxyz, k=min(5, len(reg_idx)), workers=-1)
+    d_e = dists[:, 1:]
+    j_e = nbrs[:, 1:]
+    i_e = np.repeat(np.arange(len(reg_idx), dtype=np.int32)[:, None], d_e.shape[1], axis=1)
+    valid = (d_e >= 0.0025) & (d_e <= max_edge) & (i_e < j_e)
+    ii, jj = i_e[valid], j_e[valid]
+    if len(ii) == 0:
+        return data
+
+    # Prioritize wider gaps (higher stretch risk)
+    d_sel = d_e[valid]
+    if len(ii) > max_new:
+        order = np.argsort(-d_sel)[:max_new]
+        ii, jj = ii[order], jj[order]
+
+    ga, gb = reg_idx[ii], reg_idx[jj]
+    new_d = data[ga].copy()
+    for fld in ("x", "y", "z", "f_dc_0", "f_dc_1", "f_dc_2"):
+        new_d[fld] = (0.5 * (data[fld][ga] + data[fld][gb])).astype(np.float32)
+    # Slightly plump scale & solid opacity so gaps close cleanly without puffing out silhouette
+    for sf in ("scale_0", "scale_1", "scale_2"):
+        new_d[sf] = (0.5 * (data[sf][ga] + data[sf][gb]) + 0.08).astype(np.float32)
+    new_d["opacity"] = np.maximum(data["opacity"][ga], data["opacity"][gb]).astype(np.float32)
+    return np.concatenate([data, new_d], axis=0)
+
+
 def build_stretch_neighborhood(xyz: np.ndarray, is_body: np.ndarray, k: int = 6) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     body_idx = np.where(is_body)[0]
     bxyz = xyz[body_idx]

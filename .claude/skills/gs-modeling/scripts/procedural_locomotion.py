@@ -264,17 +264,17 @@ def quadruped_gait_frame(
             if f"ear_{s}_1" in bones:
                 rots[f"ear_{s}_1"] = euler_xyz(rx_deg=-ear_sweep, ry_deg=sgn * (ear_sweep * 0.35))
 
-    # Active canine/fox tail counterbalance: lifts tail clear of hind legs + graceful phase-lagged wag!
+    # Active canine/fox tail counterbalance: distribute lift smoothly across tail_1/2/3 (prevents root stretching/thinning!)
     # In right-handed Z-up (+X left, -Y forward): for a +Y-pointing tail, z' = +y*sin(rx), so Rx(+) lifts UP!
     tail_lift = float(cfg.get("tail_lift_deg", 18.0))
     tail_sway = float(cfg.get("tail_sway_deg", 10.0))
     if "tail_1" in bones:
-        tail_pump = 5.5 * math.cos(ph_rad) if gait == "gallop" else 2.5 * math.sin(2.0 * ph_rad)
-        rots["tail_1"] = euler_xyz(rx_deg=+(tail_lift + tail_pump), rz_deg=tail_sway * math.sin(ph_rad - 0.5))
+        tail_pump = 4.0 * math.cos(ph_rad) if gait == "gallop" else 2.0 * math.sin(2.0 * ph_rad)
+        rots["tail_1"] = euler_xyz(rx_deg=+(0.48 * tail_lift + tail_pump), rz_deg=0.65 * tail_sway * math.sin(ph_rad - 0.5))
     if "tail_2" in bones:
-        rots["tail_2"] = euler_xyz(rx_deg=+0.35 * tail_lift, rz_deg=tail_sway * 0.8 * math.sin(ph_rad - 1.1))
+        rots["tail_2"] = euler_xyz(rx_deg=+0.34 * tail_lift, rz_deg=0.75 * tail_sway * math.sin(ph_rad - 1.1))
     if "tail_3" in bones:
-        rots["tail_3"] = euler_xyz(rx_deg=-0.15 * tail_lift, rz_deg=tail_sway * 0.6 * math.sin(ph_rad - 1.7))
+        rots["tail_3"] = euler_xyz(rx_deg=+0.18 * tail_lift, rz_deg=0.65 * tail_sway * math.sin(ph_rad - 1.7))
 
     root_shift = np.array([x_sway, 0.0, z_bob], dtype=np.float32)
 
@@ -412,11 +412,13 @@ def avian_wingbeat_frame(
     if "head" in bones:
         rots["head"] = euler_xyz(rx_deg=-13.0 - 0.3 * body_pitch)
 
-    # Lift & trail tail cleanly above tucked hind legs during flight (Rx(+) lifts +Y tail UP!)
+    # Lift & trail tail cleanly above tucked hind legs during flight (distributed across all 3 segments)
     if "tail_1" in bones:
-        rots["tail_1"] = euler_xyz(rx_deg=+(26.0 + 4.0 * recoil), rz_deg=4.0 * math.sin(theta0))
+        rots["tail_1"] = euler_xyz(rx_deg=+(13.0 + 3.0 * recoil), rz_deg=3.0 * math.sin(theta0))
     if "tail_2" in bones:
-        rots["tail_2"] = euler_xyz(rx_deg=+8.0, rz_deg=4.0 * math.sin(theta0 - 0.6))
+        rots["tail_2"] = euler_xyz(rx_deg=+10.0, rz_deg=3.5 * math.sin(theta0 - 0.6))
+    if "tail_3" in bones:
+        rots["tail_3"] = euler_xyz(rx_deg=+6.0, rz_deg=3.5 * math.sin(theta0 - 1.2))
     for s, sgn in (("L", +1.0), ("R", -1.0)):
         if f"ear_{s}_1" in bones:
             rots[f"ear_{s}_1"] = euler_xyz(rx_deg=-12.0, ry_deg=sgn * 4.0)
