@@ -140,6 +140,306 @@ def compute_fk_transforms(
     return world
 
 
+def _infer_bone_skin_group(bname: str, bone: dict) -> str:
+    """Infer a default skin_group for a bone when not explicitly set in rig_skeleton.json."""
+    if bone.get("skin_group"):
+        return str(bone["skin_group"])
+    role = str(bone.get("role", "")).lower()
+    side = "_L" if bname.endswith("_L") or "_L_" in bname else ("_R" if bname.endswith("_R") or "_R_" in bname else "")
+    if role in ("wing", "ear", "ribbon", "hair", "cape", "accessory", "tail", "jaw"):
+        return f"{role}{side}" if side and role in ("wing", "ear", "ribbon", "hair", "cape", "accessory") else role
+    if bname.startswith(("wing_", "ear_", "ribbon_", "hair_", "cape_", "acc_")):
+        prefix = bname.split("_", 1)[0]
+        return f"{prefix}{side}"
+    if bname.startswith("tail"):
+        return "tail"
+    if bname == "jaw" or bname.startswith("jaw_"):
+        return "jaw"
+    if bname == "head":
+        return "head"
+    if bname.startswith(("upper_arm_", "forearm_", "hand_")):
+        return f"arm{side}"
+    if bname.startswith(("front_shoulder", "front_upper", "front_lower", "front_paw")):
+        return f"front_leg{side}"
+    if bname.startswith(("hind_upper", "hind_lower", "hind_paw", "thigh_", "shin_", "foot_", "toe_")):
+        return f"leg{side}"
+    return "torso"
+
+
+def _is_legacy_humanoid_skeleton(bones: dict) -> bool:
+    """Return True iff bones match the original v2.0 humanoid rig with no v2.1 extensions."""
+    req = ("spine_lower", "upper_arm_L", "upper_arm_R", "forearm_L", "hand_L", "thigh_L", "neck", "head")
+    if not all(k in bones for k in req):
+        return False
+    for bname, b in bones.items():
+        if b.get("skin_group") or b.get("role") or b.get("seam_cut") or b.get("dynamics") or b.get("rigid") is not None:
+            return False
+        if bname.startswith(("wing_", "tail", "ear_", "ribbon_", "hair_", "cape_", "jaw", "front_", "hind_")):
+            return False
+    return True
+
+
+def _apply_seam_cuts_to_edges(
+    bxyz: np.ndarray,
+    i_e: np.ndarray,
+    j_e: np.ndarray,
+    valid: np.ndarray,
+    seam_cuts: list[dict],
+) -> np.ndarray:
+    """Cut kNN graph edges crossing any declared seam_cut plane (e.g. muzzle mouth split, wing/body seam)."""
+    if not seam_cuts:
+        return valid
+    out_valid = valid.copy()
+    ii = i_e[out_valid]
+    jj = j_e[out_valid]
+    pi = bxyz[ii]
+    pj = bxyz[jj]
+    mid = 0.5 * (pi + pj)
+    keep = np.ones(len(ii), dtype=bool)
+    for cut in seam_cuts:
+        o = np.asarray(cut["origin"], dtype=np.float32)
+        n = np.asarray(cut["normal"], dtype=np.float32)
+        n_norm = float(np.linalg.norm(n))
+        if n_norm < 1e-8:
+            continue
+        n = n / n_norm
+        si = (pi - o[None, :]) @ n
+        sj = (pj - o[None, :]) @ n
+        crosses = (si * sj) < 0.0
+        in_region = np.ones(len(ii), dtype=bool)
+        if cut.get("radius") is not None:
+            r = float(cut["radius"])
+            in_region &= np.linalg.norm(mid - o[None, :], axis=1) <= r
+        if cut.get("bbox_min") is not None and cut.get("bbox_max") is not None:
+            bmin = np.asarray(cut["bbox_min"], dtype=np.float32)
+            bmax = np.asarray(cut["bbox_max"], dtype=np.float32)
+            in_region &= np.all((mid >= bmin[None, :]) & (mid <= bmax[None, :]), axis=1)
+        keep &= ~(crosses & in_region)
+    out_valid[out_valid] = keep
+    return out_valid
+
+
+def _compute_generic_harmonic_skin_weights(
+    xyz: np.ndarray,
+    bones: dict,
+    is_body: np.ndarray,
+    seam_cuts: list[dict] | None = None,
+    max_edge: float = 0.012,
+    n_harmonic_iters: int = 90,
+    n_smooth_iters: int = 20,
+    mid_x: float | None = None,
+) -> tuple[list[str], np.ndarray]:
+    """Archetype-agnostic Harmonic Graph-Laplacian Heat-Diffusion skinning weights.
+
+    Supports humanoid, quadruped, winged, tailed, jaw/muzzle split, secondary-motion chains,
+    and arbitrary custom skeletons via optional per-bone metadata:
+      - skin_group: isolate weight diffusion between distinct anatomical groups
+      - side_lock: 'L' | 'R' to prevent cross-midline leakage
+      - rigid: bool to lock cranium / hard accessories to 1.0
+      - pin_radius: float override for core pinning radius around the bone segment
+      - influence_radius_scale: float (>1 wider reach, <1 tighter reach)
+      - region_box: {'min': [x,y,z], 'max': [x,y,z]} soft boundary constraint
+      - seam_cut: {'origin': [...], 'normal': [...], 'bbox_min': [...], 'bbox_max': [...], 'radius': float, 'keep_side': -1|+1}
+    """
+    skin_bones = [
+        b for b, bd in bones.items()
+        if b not in ("root", "eye_L", "eye_R") and not bd.get("non_deforming", False)
+    ]
+    n_pts = len(xyz)
+    n_b = len(skin_bones)
+    if n_b == 0:
+        return [], np.zeros((n_pts, 0), dtype=np.float32)
+
+    body_idx = np.where(is_body)[0]
+    bxyz = xyz[body_idx]
+    nb = len(bxyz)
+
+    if mid_x is None:
+        if "root" in bones:
+            mid_x = float(bones["root"]["head"][0])
+        elif "spine_lower" in bones:
+            mid_x = float(bones["spine_lower"]["head"][0])
+        elif "pelvis" in bones:
+            mid_x = float(bones["pelvis"]["head"][0])
+        else:
+            mid_x = float(np.median(bxyz[:, 0]))
+
+    # Collect all seam cuts (both top-level and per-bone)
+    all_cuts: list[dict] = list(seam_cuts) if seam_cuts else []
+    for bname in skin_bones:
+        sc = bones[bname].get("seam_cut")
+        if isinstance(sc, dict):
+            all_cuts.append(sc)
+
+    tree = cKDTree(bxyz)
+    dists_knn, idx_knn = tree.query(bxyz, k=min(13, nb), workers=-1)
+    d_e = dists_knn[:, 1:]
+    j_e = idx_knn[:, 1:]
+    k_nbr = d_e.shape[1]
+    i_e = np.repeat(np.arange(nb, dtype=np.int32)[:, None], k_nbr, axis=1)
+    valid = d_e <= max_edge
+    if all_cuts:
+        valid = _apply_seam_cuts_to_edges(bxyz, i_e, j_e, valid, all_cuts)
+
+    w_edge = np.exp(-(d_e[valid] / (max_edge * 0.60)) ** 2).astype(np.float32)
+    A = csr_matrix((w_edge, (i_e[valid], j_e[valid])), shape=(nb, nb))
+    A = 0.5 * (A + A.T)
+    deg = np.asarray(A.sum(axis=1)).ravel()
+    inv_deg = np.where(deg > 1e-8, 1.0 / np.maximum(deg, 1e-8), 0.0).astype(np.float32)
+    P = diags(inv_deg) @ A
+
+    groups = [_infer_bone_skin_group(b, bones[b]) for b in skin_bones]
+    unique_groups = list(dict.fromkeys(groups))
+    group_to_bidxs = {g: np.array([i for i, gg in enumerate(groups) if gg == g], dtype=np.int32) for g in unique_groups}
+
+    dists = np.full((nb, n_b), 1e6, dtype=np.float32)
+    raw_dists = np.full((nb, n_b), 1e6, dtype=np.float32)
+    bone_lens = np.zeros(n_b, dtype=np.float32)
+
+    for bi, bname in enumerate(skin_bones):
+        b = bones[bname]
+        h = np.asarray(b["head"], dtype=np.float32)
+        t = np.asarray(b["tail"], dtype=np.float32)
+        blen = float(np.linalg.norm(t - h))
+        bone_lens[bi] = blen
+        d_raw = dist_to_segment(bxyz, h, t)
+        raw_dists[:, bi] = d_raw
+        r_scale = max(float(b.get("influence_radius_scale", 1.0)), 0.1)
+        d = d_raw / r_scale
+
+        # Side lock (explicit or inferred from _L/_R suffix for limbs/wings/ears/ribbons)
+        side_lock = b.get("side_lock")
+        if side_lock is None and (bname.endswith("_L") or "_L_" in bname):
+            if not bname.startswith("clavicle_"):
+                side_lock = "L"
+        elif side_lock is None and (bname.endswith("_R") or "_R_" in bname):
+            if not bname.startswith("clavicle_"):
+                side_lock = "R"
+        if side_lock in ("L", "R"):
+            sgn = +1.0 if side_lock == "L" else -1.0
+            side_margin = float(b.get("side_margin", 0.010))
+            wrong_side = (bxyz[:, 0] - mid_x) * sgn < -side_margin
+            d = np.where(wrong_side, d + 0.80, d)
+
+        # Optional bounding box constraint
+        rbox = b.get("region_box")
+        if isinstance(rbox, dict) and "min" in rbox and "max" in rbox:
+            rmin = np.asarray(rbox["min"], dtype=np.float32)
+            rmax = np.asarray(rbox["max"], dtype=np.float32)
+            outside = np.any((bxyz < rmin[None, :]) | (bxyz > rmax[None, :]), axis=1)
+            d = np.where(outside, d + 0.80, d)
+
+        # Per-bone seam_cut sidedness (e.g. jaw keeps keep_side=-1 below mouth plane; parent head keeps +1)
+        sc = b.get("seam_cut")
+        if isinstance(sc, dict) and "origin" in sc and "normal" in sc:
+            o = np.asarray(sc["origin"], dtype=np.float32)
+            n = np.asarray(sc["normal"], dtype=np.float32)
+            n = n / max(float(np.linalg.norm(n)), 1e-8)
+            keep_side = float(sc.get("keep_side", -1.0))
+            signed = (bxyz - o[None, :]) @ n
+            in_reg = np.ones(nb, dtype=bool)
+            if sc.get("radius") is not None:
+                in_reg &= np.linalg.norm(bxyz - o[None, :], axis=1) <= float(sc["radius"])
+            if sc.get("bbox_min") is not None and sc.get("bbox_max") is not None:
+                bmin = np.asarray(sc["bbox_min"], dtype=np.float32)
+                bmax = np.asarray(sc["bbox_max"], dtype=np.float32)
+                in_reg &= np.all((bxyz >= bmin[None, :]) & (bxyz <= bmax[None, :]), axis=1)
+            wrong_half = in_reg & (signed * keep_side < 0.0)
+            d = np.where(wrong_half, d + 0.80, d)
+
+        dists[:, bi] = d
+
+    # Also penalize parent bone on the child's side of a seam_cut (e.g. head penalized on jaw's lower mouth side)
+    for bi, bname in enumerate(skin_bones):
+        b = bones[bname]
+        sc = b.get("seam_cut")
+        parent = b.get("parent")
+        if isinstance(sc, dict) and parent in skin_bones and "origin" in sc and "normal" in sc:
+            p_idx = skin_bones.index(parent)
+            o = np.asarray(sc["origin"], dtype=np.float32)
+            n = np.asarray(sc["normal"], dtype=np.float32)
+            n = n / max(float(np.linalg.norm(n)), 1e-8)
+            keep_side = float(sc.get("keep_side", -1.0))
+            signed = (bxyz - o[None, :]) @ n
+            in_reg = np.ones(nb, dtype=bool)
+            if sc.get("radius") is not None:
+                in_reg &= np.linalg.norm(bxyz - o[None, :], axis=1) <= float(sc["radius"])
+            if sc.get("bbox_min") is not None and sc.get("bbox_max") is not None:
+                bmin = np.asarray(sc["bbox_min"], dtype=np.float32)
+                bmax = np.asarray(sc["bbox_max"], dtype=np.float32)
+                in_reg &= np.all((bxyz >= bmin[None, :]) & (bxyz <= bmax[None, :]), axis=1)
+            child_half = in_reg & (signed * keep_side >= 0.0)
+            dists[:, p_idx] = np.where(child_half, dists[:, p_idx] + 0.80, dists[:, p_idx])
+
+    # Group-level core pinning: each point whose closest bone is well within that bone's core radius
+    # is pinned to that bone's skin_group (preventing cross-group bleed during diffusion).
+    best_b = np.argmin(dists, axis=1)
+    best_d = dists[np.arange(nb), best_b]
+    second_d = np.partition(dists, min(1, n_b - 1), axis=1)[:, min(1, n_b - 1)]
+
+    pin_radii = np.array([
+        float(bones[b].get("pin_radius", np.clip(bone_lens[i] * 0.42, 0.022, 0.065)))
+        for i, b in enumerate(skin_bones)
+    ], dtype=np.float32)
+
+    dists_pin = dists.copy()
+    pinned = np.zeros(nb, dtype=bool)
+
+    for g in unique_groups:
+        g_bidxs = group_to_bidxs[g]
+        in_g = np.isin(best_b, g_bidxs)
+        g_core = in_g & (
+            (best_d <= pin_radii[best_b])
+            | ((second_d - best_d) > 0.025)
+        )
+        if np.any(g_core):
+            g_mask = np.zeros(n_b, dtype=bool)
+            g_mask[g_bidxs] = True
+            dists_pin[g_core] = np.where(g_mask[None, :], dists_pin[g_core], 10.0)
+            pinned |= g_core
+
+    dmin = np.min(dists_pin, axis=1, keepdims=True)
+    W_b = np.exp(-((dists_pin - dmin) / 0.024) ** 2).astype(np.float32)
+    W_b /= np.maximum(W_b.sum(axis=1, keepdims=True), 1e-8)
+
+    free = (~pinned) & (deg > 1e-8)
+    for _ in range(n_harmonic_iters):
+        W_b[free] = (P @ W_b)[free]
+
+    # Rigid locks (e.g. head cranium or hard accessories with rigid=True)
+    rigid_mask_all = np.zeros(nb, dtype=bool)
+    rigid_locks: list[tuple[int, np.ndarray]] = []
+    for bi, bname in enumerate(skin_bones):
+        b = bones[bname]
+        if b.get("rigid", False):
+            rm = (best_b == bi) & (W_b[:, bi] >= 0.55)
+            if np.any(rm):
+                rigid_locks.append((bi, rm))
+                rigid_mask_all |= rm
+
+    has_nbr = (deg > 1e-8) & (~rigid_mask_all)
+    for _ in range(n_smooth_iters):
+        W_b[has_nbr] = 0.55 * W_b[has_nbr] + 0.45 * (P @ W_b)[has_nbr]
+
+    for bi, rm in rigid_locks:
+        W_b[rm] = 0.0
+        W_b[rm, bi] = 1.0
+
+    k_top = min(4, n_b)
+    if n_b > 4:
+        top_idx = np.argpartition(-W_b, kth=k_top - 1, axis=1)[:, :k_top]
+        W_sp = np.zeros_like(W_b)
+        r_idx = np.arange(nb)[:, None]
+        W_sp[r_idx, top_idx] = W_b[r_idx, top_idx]
+        W_sp /= np.maximum(W_sp.sum(axis=1, keepdims=True), 1e-8)
+    else:
+        W_sp = W_b / np.maximum(W_b.sum(axis=1, keepdims=True), 1e-8)
+
+    W_full = np.zeros((n_pts, n_b), dtype=np.float32)
+    W_full[body_idx] = W_sp
+    return skin_bones, W_full
+
+
 def compute_harmonic_skin_weights(
     xyz: np.ndarray,
     bones: dict,
@@ -147,10 +447,29 @@ def compute_harmonic_skin_weights(
     max_edge: float = 0.012,
     n_harmonic_iters: int = 90,
     n_smooth_iters: int = 20,
+    seam_cuts: list[dict] | None = None,
+    use_generic: bool | None = None,
+    mid_x: float | None = None,
 ) -> tuple[list[str], np.ndarray]:
     """Data-driven C-infinity smooth Harmonic Graph-Laplacian Heat-Diffusion skinning weights.
-    Adapts automatically to both T-pose (75-90 deg) and A-pose (~45 deg) skeletons.
+
+    - Legacy v2.0 humanoid skeletons automatically use the battle-tested humanoid core pinning
+      (100% backward compatible with existing v1 packages such as hood-01).
+    - Extended v2.1 / non-humanoid / secondary-motion / winged / quadruped / jaw skeletons
+      automatically dispatch to the generic group & seam-cut Harmonic solver.
     """
+    if use_generic is True or (use_generic is None and (seam_cuts or not _is_legacy_humanoid_skeleton(bones))):
+        return _compute_generic_harmonic_skin_weights(
+            xyz=xyz,
+            bones=bones,
+            is_body=is_body,
+            seam_cuts=seam_cuts,
+            max_edge=max_edge,
+            n_harmonic_iters=n_harmonic_iters,
+            n_smooth_iters=n_smooth_iters,
+            mid_x=mid_x,
+        )
+
     skin_bones = [b for b in bones if b not in ("root", "eye_L", "eye_R")]
     n_pts = len(xyz)
     n_b = len(skin_bones)
