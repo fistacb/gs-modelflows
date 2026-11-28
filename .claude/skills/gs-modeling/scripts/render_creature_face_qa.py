@@ -38,7 +38,7 @@ from secondary_motion import SecondaryMotionSolver
 from creature_face_rig import (
     build_creature_eyeball,
     build_creature_eyelid_shell,
-    build_inner_mouth_patch,
+    build_creature_mouth_patch,
     carve_creature_sockets,
     fit_creature_face,
 )
@@ -101,11 +101,10 @@ def main():
         f"fur_rgb={[round(v,2) for v in face_meta['fur_rgb']]}"
     )
 
-    # 2. Carve eye sockets + generate independent eyeballs + inner mouth patch
+    # 2. Carve eye sockets + generate independent eyeballs
     body_carved = carve_creature_sockets(data, face_meta)
     eye_L_loc = build_creature_eyeball(face_meta["eye_L"], face_meta["iris_palette"], data.dtype)
     eye_R_loc = build_creature_eyeball(face_meta["eye_R"], face_meta["iris_palette"], data.dtype)
-    inner_mouth = build_inner_mouth_patch(face_meta, data.dtype)
 
     # Place eyeballs into world rest coordinates (so head/eye rigid transform applies cleanly)
     eL_rest = eye_L_loc.copy()
@@ -117,6 +116,8 @@ def main():
 
     # 3. Compute Harmonic skin weights on carved body (including refined jaw + seam_cut)
     xyz = np.column_stack([body_carved["x"], body_carved["y"], body_carved["z"]]).astype(np.float32)
+    from harmonic_dqs import SH_C0 as _SH_C0
+    body_rgb = np.clip(0.5 + _SH_C0 * np.column_stack([body_carved["f_dc_0"], body_carved["f_dc_1"], body_carved["f_dc_2"]]), 0.0, 1.0).astype(np.float32)
     skin_bones, W = compute_harmonic_skin_weights(
         xyz, bones, np.ones(len(xyz), dtype=bool), seam_cuts=skel.get("seam_cuts")
     )
@@ -137,9 +138,8 @@ def main():
     packed.tofile(anim_dir / "body_skin.bin")
     write_ply(anim_dir / "eye_L.ply", _ply_to_spark(eL_rest))
     write_ply(anim_dir / "eye_R.ply", _ply_to_spark(eR_rest))
-    write_ply(anim_dir / "inner_mouth.ply", _ply_to_spark(inner_mouth))
 
-    # Pre-bake quantized eyelid shells (blink levels 0.1..1.0) so GPU anim swaps instantly
+    # Pre-bake quantized kNN-fur-matched eyelid shells & animated mouth patches (0.0 = hidden!)
     blink_levels = [0.0, 0.25, 0.50, 0.75, 1.0]
     lid_files: dict[tuple[str, int], str] = {}
     for side in ("eye_L", "eye_R"):
@@ -147,28 +147,39 @@ def main():
             if bv <= 0.02:
                 continue
             lid_ply = build_creature_eyelid_shell(
-                face_meta[side], face_meta["fur_rgb"], face_meta["lash_rgb"], bv, data.dtype
+                face_meta[side], face_meta["fur_rgb"], face_meta["lash_rgb"], bv, data.dtype,
+                body_xyz=xyz, body_rgb=body_rgb,
             )
             if len(lid_ply) > 0:
                 fname = f"lid_{side}_{bi}.ply"
                 write_ply(anim_dir / fname, _ply_to_spark(lid_ply))
                 lid_files[(side, bi)] = f"frames/{anim_tag}/{fname}"
 
+    mouth_levels = [0.0, 0.25, 0.50, 0.75, 1.0]
+    mouth_files: dict[int, str] = {}
+    for mi, mv in enumerate(mouth_levels):
+        if mv <= 0.04:
+            continue
+        mply = build_creature_mouth_patch(face_meta, mv, data.dtype, body_xyz=xyz)
+        if len(mply) > 0:
+            fname = f"mouth_{mi}.ply"
+            write_ply(anim_dir / fname, _ply_to_spark(mply))
+            mouth_files[mi] = f"frames/{anim_tag}/{fname}"
+
     # 4. Build 96-frame face showcase choreography (4 parts x 24 frames)
     order = build_fk_hierarchy(bones)
-    choreo = []  # (label, yaw_cam, pitch_cam, rots, blink_L, blink_R, eye_yaw, eye_pitch)
+    choreo = []  # (label, yaw_cam, pitch_cam, rots, blink_L, blink_R, eye_yaw, eye_pitch, mouth_open)
 
     # Part 1: BLINK (24f, front-3/4 close-up)
     for i in range(24):
         t = i / 24.0
-        # Two crisp blinks
         b = 0.0
         for c in (0.28, 0.72):
             dist = abs(t - c)
             if dist < 0.14:
                 b = max(b, math.cos((dist / 0.14) * math.pi * 0.5) ** 1.4)
         rots = {"head": euler_xyz(rx_deg=3.0 * math.sin(2 * math.pi * t), rz_deg=5.0 * math.sin(2 * math.pi * t))}
-        choreo.append(("1. BLINK", -12.0, 6.0, rots, b, b, 0.0, 0.0))
+        choreo.append(("1. BLINK", -12.0, 6.0, rots, b, b, 0.0, 0.0, 0.0))
 
     # Part 2: EYE GAZE (24f, eyes look left -> right -> up -> center)
     for i in range(24):
@@ -176,7 +187,7 @@ def main():
         ey = 18.0 * math.sin(2 * math.pi * t)
         ep = 10.0 * math.sin(4 * math.pi * t)
         rots = {"head": euler_xyz(rz_deg=4.0 * math.sin(2 * math.pi * t))}
-        choreo.append(("2. EYE GAZE", -8.0, 5.0, rots, 0.0, 0.0, ey, ep))
+        choreo.append(("2. EYE GAZE", -8.0, 5.0, rots, 0.0, 0.0, ey, ep, 0.0))
 
     # Part 3: WINK L + HEAD TILT (24f)
     for i in range(24):
@@ -186,18 +197,17 @@ def main():
             "head": euler_xyz(rx_deg=4.0 * w, ry_deg=11.0 * w, rz_deg=-8.0 * w),
             "neck": euler_xyz(ry_deg=5.0 * w),
         }
-        choreo.append(("3. WINK & HEAD TILT", -15.0, 6.0, rots, w, 0.0, -6.0 * w, 0.0))
+        choreo.append(("3. WINK & HEAD TILT", -15.0, 6.0, rots, w, 0.0, -6.0 * w, 0.0, 0.0))
 
-    # Part 4: JAW OPEN / BARK (24f, oblique close-up to clearly show muzzle opening + inner mouth)
+    # Part 4: JAW OPEN / BARK (24f, animated procedural mouth + subtle synchronized jaw drop)
     for i in range(24):
         t = i / 24.0
-        # Two expressive jaw opens ("yip-yip!")
         j_open = max(0.0, math.sin(2 * math.pi * t * 2.0)) ** 0.85
         rots = {
-            "head": euler_xyz(rx_deg=-8.0 * j_open, rz_deg=6.0 * math.sin(2 * math.pi * t)),
-            "jaw": euler_xyz(rx_deg=+32.0 * j_open),
+            "head": euler_xyz(rx_deg=-7.0 * j_open, rz_deg=5.0 * math.sin(2 * math.pi * t)),
+            "jaw": euler_xyz(rx_deg=+10.0 * j_open),
         }
-        choreo.append(("4. JAW OPEN / MUZZLE", -28.0 + 18.0 * math.sin(math.pi * t), 5.0, rots, 0.0, 0.0, 0.0, -4.0 * j_open))
+        choreo.append(("4. MOUTH & JAW", -24.0 + 16.0 * math.sin(math.pi * t), 5.0, rots, 0.0, 0.0, 0.0, -4.0 * j_open, j_open))
 
     # Run secondary motion (ears & ribbons react softly to head tilts & barks!)
     solver = SecondaryMotionSolver(bones, order)
@@ -223,38 +233,48 @@ def main():
     }
 
     h_head_r = np.asarray(bones["head"]["head"], dtype=np.float32)
+    gL_hat = np.asarray(face_meta["eye_L"].get("gaze_dir", [0.0, -1.0, 0.0]), dtype=np.float32)
+    gR_hat = np.asarray(face_meta["eye_R"].get("gaze_dir", [0.0, -1.0, 0.0]), dtype=np.float32)
     anim_frames = []
-    for fi, ((lbl, yaw, pitch, _, bL, bR, ey, ep), world) in enumerate(zip(choreo, world_seq)):
+    for fi, ((lbl, yaw, pitch, _, bL, bR, ey, ep, m_open), world) in enumerate(zip(choreo, world_seq)):
         bf = fk_to_spark_bones(bones, skin_bones, world)
         R_hd, h_hd, _ = world["head"]
         t_hd = h_hd - (R_hd @ h_head_r)
         qp_hd = blender_rigid_to_spark_qp(R_hd, t_hd)
 
-        # Compute independent eye world transforms (head transform * local eye gaze rotation around eyeball center)
+        # Retract closed eyeball slightly inward along -gaze_dir during blink (same trick as humanoid pipeline!)
+        retract_L = -gL_hat * (0.012 * max(0.0, (bL - 0.35) / 0.65))
+        retract_R = -gR_hat * (0.012 * max(0.0, (bR - 0.35) / 0.65))
+
         R_gaze = euler_xyz(rx_deg=ep, rz_deg=ey)
         R_eL = (R_hd @ R_gaze).astype(np.float32)
-        h_eL_w = h_hd + R_hd @ (pL - h_head_r)
+        h_eL_w = h_hd + R_hd @ (pL + retract_L - h_head_r)
         t_eL = h_eL_w - (R_eL @ pL)
         qp_eL = blender_rigid_to_spark_qp(R_eL, t_eL)
 
         R_eR = (R_hd @ R_gaze).astype(np.float32)
-        h_eR_w = h_hd + R_hd @ (pR - h_head_r)
+        h_eR_w = h_hd + R_hd @ (pR + retract_R - h_head_r)
         t_eR = h_eR_w - (R_eR @ pR)
         qp_eR = blender_rigid_to_spark_qp(R_eR, t_eR)
 
         extra_plys = [
             f"frames/{anim_tag}/eye_L.ply",
             f"frames/{anim_tag}/eye_R.ply",
-            f"frames/{anim_tag}/inner_mouth.ply",
         ]
-        extra_xforms = [qp_eL, qp_eR, qp_hd]
+        extra_xforms = [qp_eL, qp_eR]
 
-        # Attach quantized eyelid shells when blinking
+        # Attach quantized solid eyelid shells when blinking
         for side, bv in (("eye_L", bL), ("eye_R", bR)):
             bi = int(np.argmin([abs(bv - lvl) for lvl in blink_levels]))
             if (side, bi) in lid_files:
                 extra_plys.append(lid_files[(side, bi)])
                 extra_xforms.append(qp_hd)
+
+        # Attach animated mouth patch ONLY when mouth is open (ZERO bleed-through when closed!)
+        mi = int(np.argmin([abs(m_open - lvl) for lvl in mouth_levels]))
+        if mi in mouth_files:
+            extra_plys.append(mouth_files[mi])
+            extra_xforms.append(qp_hd)
 
         cam_f = dict(default_cam)
         cam_f["pitch"] = float(pitch)

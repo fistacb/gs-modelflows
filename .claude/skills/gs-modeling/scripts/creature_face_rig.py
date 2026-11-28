@@ -520,8 +520,15 @@ def build_creature_eyelid_shell(
     lash_rgb: list[float],
     blink: float,
     dtype: np.dtype,
+    body_xyz: np.ndarray | None = None,
+    body_rgb: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Generate a curved creature eyelid curtain + arched lash line aligned to the eye's local cheek frame."""
+    """Generate a solid, fur-matched creature eyelid curtain + crisp arched lash line.
+
+    - Samples local fur colors via kNN from surrounding cheek/brow splats (when body_xyz/body_rgb
+      are provided) so the closed eyelid blends seamlessly into the face instead of looking like a flat patch.
+    - Covers up to +1.22*rz to cleanly mask the static open-eye upper lash line during closure.
+    """
     if blink <= 0.02:
         return np.zeros(0, dtype=dtype)
 
@@ -535,26 +542,26 @@ def build_creature_eyelid_shell(
     ).astype(np.float32)
 
     er = eye_meta["exclusion_radius"]
-    rx = float(er[0]) * 1.05
-    rz = float(er[2]) * 1.08
+    rx = float(er[0]) * 1.18
+    rz = float(er[2]) * 1.22
 
-    # Grid in the eye's local tangent frame (dx, dz); curtain descends from +rz down to z_edge as blink 0 -> 1
-    z_top = rz * 1.00
+    # Curtain descends from +rz down to z_edge as blink goes 0 -> 1
+    z_top = rz * 1.05
     z_bot = -rz * 1.05
     z_edge = z_top - float(np.clip(blink, 0.0, 1.0)) * (z_top - z_bot)
 
-    nu, nv = 34, 24
+    nu, nv = 38, 28
     us = np.linspace(-rx, rx, nu, dtype=np.float32)
     vs = np.linspace(z_bot, z_top, nv, dtype=np.float32)
     uu, vv = np.meshgrid(us, vs)
     dx = uu.ravel()
     dz = vv.ravel()
 
-    # Almond eye aperture + gentle lash arch
+    # Smooth almond eye aperture + gentle smile-like closed lash arch
     in_ell = (dx / rx) ** 2 + (dz / rz) ** 2 <= 1.02
-    arch = 0.18 * rz * (1.0 - (dx / rx) ** 2) * (1.0 - 0.80 * float(blink))
+    arch = 0.22 * rz * (1.0 - (dx / rx) ** 2) * (1.0 - 0.65 * float(blink))
     z_cur_edge = z_edge + arch
-    on_lid = in_ell & (dz >= z_cur_edge - 0.18 * rz)
+    on_lid = in_ell & (dz >= z_cur_edge - 0.16 * rz)
     if not np.any(on_lid):
         return np.zeros(0, dtype=dtype)
 
@@ -562,37 +569,117 @@ def build_creature_eyelid_shell(
     dz = dz[on_lid]
     z_cur_edge = z_cur_edge[on_lid]
 
-    # Gentle spherical wrap around the eyeball front cap (sits ~1.5 mm in front of iris, never protruding!)
-    r_wrap = max(r_eye * 1.06, 0.020)
+    # Gentle spherical wrap sitting flush right over the socket opening (clears static upper lash line!)
+    r_wrap = max(r_eye * 1.10, 0.022)
     rad_sq = np.maximum(r_wrap * r_wrap - dx * dx - dz * dz, (r_wrap * 0.35) ** 2)
-    dy_local = (r_wrap - np.sqrt(rad_sq)) - 0.0018  # slightly recessed at edges, 1.8 mm ahead at pole
+    dy_local = (r_wrap - np.sqrt(rad_sq)) - 0.0045
     loc_pts = np.column_stack([dx, dy_local, dz]).astype(np.float32)
     pts = sc[None, :] + (loc_pts @ R_align.T)
 
-    # Color: face fur on upper curtain, gentle dark lash stroke along the descending lower rim
-    dist_to_edge = np.abs(dz - z_cur_edge)
-    lash_thick = max(rz * 0.22, 0.0024)
-    is_lash = _smoothstep(lash_thick, lash_thick * 0.35, dist_to_edge)
+    # Sample bright fur color locally around the eye border so eyelid matches surrounding cheek/brow shading
     fur_c = np.asarray(fur_rgb, dtype=np.float32)
-    lash_c = np.asarray(lash_rgb, dtype=np.float32)
-    rgb = fur_c[None, :] * (1.0 - is_lash[:, None]) + lash_c[None, :] * is_lash[:, None]
+    if body_xyz is not None and body_rgb is not None and len(body_xyz) >= 50:
+        from scipy.spatial import cKDTree as _cKDTree
+        d_fur = np.linalg.norm(body_rgb - fur_c[None, :], axis=1)
+        m_f = (d_fur < 0.24) & (np.linalg.norm(body_xyz - sc[None, :], axis=1) < max(rx * 2.5, 0.07))
+        if int(m_f.sum()) >= 20:
+            tree = _cKDTree(body_xyz[m_f])
+            _, nn = tree.query(pts, k=min(8, int(m_f.sum())))
+            if nn.ndim == 1:
+                nn = nn[:, None]
+            curtain_rgb = np.median(body_rgb[m_f][nn], axis=1).astype(np.float32)
+        else:
+            curtain_rgb = np.broadcast_to(fur_c[None, :], (len(pts), 3)).copy()
+    else:
+        curtain_rgb = np.broadcast_to(fur_c[None, :], (len(pts), 3)).copy()
 
-    # Outward normals on the spherical wrap rotated into world space
+    # Crisp dark lash stroke along the descending lower rim (thicker & cleaner so it reads clearly as closed eye)
+    dist_to_edge = np.abs(dz - z_cur_edge)
+    lash_thick = max(rz * 0.16, 0.0026)
+    is_lash = _smoothstep(lash_thick, lash_thick * 0.30, dist_to_edge)
+    lash_c = np.asarray(lash_rgb, dtype=np.float32) * 0.72
+    rgb = curtain_rgb * (1.0 - is_lash[:, None]) + lash_c[None, :] * is_lash[:, None]
+
     loc_nrm = np.column_stack([dx / r_wrap, -np.sqrt(rad_sq) / r_wrap, dz / r_wrap]).astype(np.float32)
     normals = (loc_nrm @ R_align.T).astype(np.float32)
     rot = _normal_to_quat_wxyz(normals)
 
-    s_xy = max(rx / nu * 1.45, 0.0024)
+    # Slightly fuller splats + high opacity so the eyelid is 100% solid (never thin/translucent)
+    s_xy = max(rx / nu * 1.75, 0.0030)
     out = np.zeros(len(pts), dtype=dtype)
     out["x"], out["y"], out["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
     out["f_dc_0"] = (rgb[:, 0] - 0.5) / SH_C0
     out["f_dc_1"] = (rgb[:, 1] - 0.5) / SH_C0
     out["f_dc_2"] = (rgb[:, 2] - 0.5) / SH_C0
-    out["opacity"] = 4.6
+    out["opacity"] = 5.5
     out["scale_0"] = math.log(s_xy)
     out["scale_1"] = math.log(s_xy)
-    out["scale_2"] = math.log(s_xy * 0.25)
+    out["scale_2"] = math.log(s_xy * 0.30)
     out["rot_0"], out["rot_1"], out["rot_2"], out["rot_3"] = rot[:, 0], rot[:, 1], rot[:, 2], rot[:, 3]
+    return out
+
+
+def build_creature_mouth_patch(
+    face_meta: dict[str, Any],
+    open_amt: float,
+    dtype: np.dtype,
+    body_xyz: np.ndarray | None = None,
+) -> np.ndarray:
+    """Build a cute animated creature mouth patch flush on the front muzzle surface (hidden when closed)."""
+    if open_amt <= 0.04:
+        return np.zeros(0, dtype=dtype)
+
+    mc = np.asarray(face_meta["mouth_center"], dtype=np.float32).copy()
+    mw = float(face_meta.get("mouth_width", 0.045))
+
+    # Snap mouth surface Y to the actual frontmost muzzle surface right at (mc[0], mc[2])
+    if body_xyz is not None and len(body_xyz) >= 50:
+        m_m = (np.abs(body_xyz[:, 0] - mc[0]) <= mw * 0.45) & (np.abs(body_xyz[:, 2] - mc[2]) <= mw * 0.45)
+        if int(m_m.sum()) >= 8:
+            mc[1] = float(np.percentile(body_xyz[m_m, 1], 12))
+
+    rx = mw * (0.28 + 0.14 * float(open_amt))
+    rz = mw * (0.08 + 0.30 * float(open_amt))
+
+    nu, nv = 24, 20
+    us = np.linspace(-1.0, 1.0, nu, dtype=np.float32)
+    vs = np.linspace(-1.0, 1.0, nv, dtype=np.float32)
+    uu, vv = np.meshgrid(us, vs)
+    u = uu.ravel()
+    v = vv.ravel()
+    # Cute rounded-triangle / fox "a/o" mouth shape (wider at top, softly rounded at bottom)
+    r2 = (u / np.maximum(0.85 + 0.18 * v, 0.4)) ** 2 + v * v
+    keep = r2 <= 1.0
+    u, v, r2 = u[keep], v[keep], r2[keep]
+
+    # Sit cleanly flush on the frontmost muzzle skin so the open pink mouth reads clearly without burying
+    y_bowl = mc[1] - 0.0055 + 0.0020 * (1.0 - r2)
+    pts = np.column_stack([
+        mc[0] + u * rx,
+        y_bowl,
+        mc[2] - 0.002 + v * rz,
+    ]).astype(np.float32)
+
+    # Dark rose mouth interior + cute bright coral-pink tongue at bottom + soft rim
+    dark_in = np.array([0.38, 0.10, 0.14], dtype=np.float32)
+    tongue = np.array([0.92, 0.44, 0.48], dtype=np.float32)
+    rim_c = np.array([0.52, 0.22, 0.24], dtype=np.float32)
+    t_tongue = _smoothstep(0.05, -0.55, v) * _smoothstep(0.95, 0.45, r2)
+    t_rim = _smoothstep(0.70, 0.98, r2)
+    rgb = dark_in[None, :] * (1.0 - t_tongue[:, None]) + tongue[None, :] * t_tongue[:, None]
+    rgb = rgb * (1.0 - 0.65 * t_rim[:, None]) + rim_c[None, :] * (0.65 * t_rim[:, None])
+
+    s_xy = max(rx / nu * 1.8, 0.0022)
+    out = np.zeros(len(pts), dtype=dtype)
+    out["x"], out["y"], out["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+    out["f_dc_0"] = (rgb[:, 0] - 0.5) / SH_C0
+    out["f_dc_1"] = (rgb[:, 1] - 0.5) / SH_C0
+    out["f_dc_2"] = (rgb[:, 2] - 0.5) / SH_C0
+    out["opacity"] = 5.2
+    out["scale_0"] = math.log(s_xy)
+    out["scale_1"] = math.log(s_xy)
+    out["scale_2"] = math.log(s_xy * 0.30)
+    out["rot_0"] = 1.0
     return out
 
 
