@@ -256,44 +256,48 @@ def build_animal_locomotion(bones: dict, fps: int = 12):
                     rots[f"wing_{s}_2"] = euler_xyz(rz_deg=sgn * 8.0)
         shift = np.array([0.0, 0.0, 0.012 * abs(math.sin(ph))], dtype=np.float32)
         wind = np.array([0.0, 0.7, 0.0], dtype=np.float32)
-        frames.append(("1. WALK (QUADRUPED)", -55.0, 10.0, rots, shift, wind))
+        # Smooth camera orbit from front-3/4 (-25) to side-3/4 (-80) so all 4 legs are clearly visible
+        yaw_w = -25.0 - 55.0 * (0.5 - 0.5 * math.cos(math.pi * t))
+        frames.append(("1. WALK (QUADRUPED)", yaw_w, 10.0, rots, shift, wind))
 
-    # 2. RUN / GALLOP (24 frames, energetic bounding gallop with spine flexion & trailing wings)
+    # 2. RUN / GALLOP (24 frames, energetic rotary gallop with distinct L/R lead-leg timing & camera orbit)
     for i in range(24):
         t = i / 24.0
-        ph = 2.0 * math.pi * t * 2.5
+        ph = 2.0 * math.pi * t * 2.0
         rots = {}
         if has_quad:
-            # Asymmetric gallop: front pair slightly offset, hind pair opposite phase
-            for s, lag in (("L", 0.0), ("R", 0.35)):
+            # Distinct rotary gallop phase offsets so L & R front/hind legs clearly separate in motion
+            for s, lag in (("L", 0.0), ("R", 1.15)):
                 pf = ph + lag
                 phind = ph + math.pi + lag
-                rots[f"front_upper_{s}"] = euler_xyz(rx_deg=28.0 * math.sin(pf) - 6.0)
-                rots[f"front_lower_{s}"] = euler_xyz(rx_deg=-36.0 * max(0.0, -math.cos(pf)))
+                rots[f"front_upper_{s}"] = euler_xyz(rx_deg=26.0 * math.sin(pf) - 4.0)
+                rots[f"front_lower_{s}"] = euler_xyz(rx_deg=-34.0 * max(0.0, -math.cos(pf)))
                 rots[f"front_paw_{s}"] = euler_xyz(rx_deg=14.0 * math.sin(pf))
-                rots[f"hind_upper_{s}"] = euler_xyz(rx_deg=26.0 * math.sin(phind) + 6.0)
-                rots[f"hind_lower_{s}"] = euler_xyz(rx_deg=34.0 * max(0.0, math.cos(phind)))
+                rots[f"hind_upper_{s}"] = euler_xyz(rx_deg=24.0 * math.sin(phind) + 4.0)
+                rots[f"hind_lower_{s}"] = euler_xyz(rx_deg=32.0 * max(0.0, math.cos(phind)))
                 rots[f"hind_paw_{s}"] = euler_xyz(rx_deg=-14.0 * math.sin(phind))
         if "pelvis" in bones:
-            rots["pelvis"] = euler_xyz(rx_deg=9.0 * math.cos(ph))
+            rots["pelvis"] = euler_xyz(rx_deg=8.0 * math.cos(ph))
         if "spine_mid" in bones:
-            rots["spine_mid"] = euler_xyz(rx_deg=-10.0 * math.cos(ph))
+            rots["spine_mid"] = euler_xyz(rx_deg=-9.0 * math.cos(ph))
         if "chest" in bones:
-            rots["chest"] = euler_xyz(rx_deg=-6.0 * math.cos(ph))
+            rots["chest"] = euler_xyz(rx_deg=-5.0 * math.cos(ph))
         if "neck" in bones:
-            rots["neck"] = euler_xyz(rx_deg=10.0 + 5.0 * math.cos(ph))
+            rots["neck"] = euler_xyz(rx_deg=9.0 + 4.0 * math.cos(ph))
         if "head" in bones:
-            rots["head"] = euler_xyz(rx_deg=-8.0 - 4.0 * math.cos(ph))
+            rots["head"] = euler_xyz(rx_deg=-7.0 - 3.0 * math.cos(ph))
         if has_wings:
             for s, sgn in (("L", +1.0), ("R", -1.0)):
                 if f"wing_{s}_1" in bones:
                     rots[f"wing_{s}_1"] = euler_xyz(ry_deg=sgn * (6.0 * math.sin(ph)), rz_deg=sgn * 16.0)
                 if f"wing_{s}_2" in bones:
                     rots[f"wing_{s}_2"] = euler_xyz(rz_deg=sgn * 12.0)
-        air = 0.055 * max(0.0, math.sin(ph))
+        air = 0.050 * max(0.0, math.sin(ph))
         shift = np.array([0.0, 0.0, air], dtype=np.float32)
-        wind = np.array([0.0, 2.2, 0.0], dtype=np.float32)
-        frames.append(("2. RUN (GALLOP)", -62.0, 10.0, rots, shift, wind))
+        wind = np.array([0.0, 2.0, 0.0], dtype=np.float32)
+        # Orbit camera from side (-80) around front-3/4 (-20) during run so L/R front legs are unmistakably distinct
+        yaw_r = -80.0 + 60.0 * (0.5 - 0.5 * math.cos(math.pi * t))
+        frames.append(("2. RUN (GALLOP)", yaw_r, 11.0, rots, shift, wind))
 
     # 3. FLY (36 frames, airborne soaring + full articulated bilateral wingbeats + tucked flight legs)
     for i in range(36):

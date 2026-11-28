@@ -217,44 +217,105 @@ def fit_quadruped_skeleton(
     z_max = float(np.percentile(pts[:, 2], 99.5))
     height = max(z_max - z_min, 0.1)
 
-    if mid_x is None:
-        # Estimate symmetry midline from lower body / legs
-        low = pts[pts[:, 2] <= z_min + 0.55 * height]
-        mid_x = float(np.median(low[:, 0])) if len(low) >= 50 else float(np.median(pts[:, 0]))
+    # 1. Detect the 4 true legs using ground-contact connected components + vertical column scoring.
+    # This cleanly rejects low-hanging tails/cloth wisps (which lack a vertical leg column above them)
+    # and separates close L/R paws even on oblique 3/4-view generations!
+    from scipy.sparse.csgraph import connected_components as _cc
 
-    # 1. Detect 4 legs in the lower 35% of the model (excluding wide wings/high tails)
-    z_paw_top = z_min + float(cfg.get("paw_band_frac", 0.14)) * height
     z_belly = z_min + float(cfg.get("belly_frac", 0.36)) * height
-    leg_pts = pts[(pts[:, 2] >= z_min) & (pts[:, 2] <= z_belly)]
-    paw_pts = pts[(pts[:, 2] >= z_min) & (pts[:, 2] <= z_paw_top)]
-    if len(paw_pts) < 40:
-        paw_pts = leg_pts
+    z_ground_band = z_min + float(cfg.get("ground_band_frac", 0.062)) * height
+    g_pts = pts[(pts[:, 2] >= z_min - 0.02 * height) & (pts[:, 2] <= z_ground_band)]
+    if len(g_pts) < 40:
+        g_pts = pts[pts[:, 2] <= z_min + 0.14 * height]
 
-    # Front (-Y) vs Hind (+Y) split at median Y of paw points
-    y_leg_split = float(cfg.get("y_leg_split", np.median(paw_pts[:, 1])))
-    y_front_paws = float(np.percentile(paw_pts[paw_pts[:, 1] <= y_leg_split, 1], 35)) if np.any(paw_pts[:, 1] <= y_leg_split) else (y_leg_split - 0.15 * height)
-    y_hind_paws = float(np.percentile(paw_pts[paw_pts[:, 1] > y_leg_split, 1], 65)) if np.any(paw_pts[:, 1] > y_leg_split) else (y_leg_split + 0.15 * height)
+    paw_clusters: list[tuple[float, float, float, np.ndarray]] = []  # (score, cx, cy, sub_pts)
+    if len(g_pts) >= 20:
+        adj_g = cKDTree(g_pts[:, :2]).sparse_distance_matrix(
+            cKDTree(g_pts[:, :2]), max_distance=0.022 * height, output_type="coo_matrix"
+        )
+        n_cc, cc_labels = _cc(adj_g, directed=False)
+        for cid in range(n_cc):
+            m_c = cc_labels == cid
+            n_c = int(m_c.sum())
+            if n_c < 15:
+                continue
+            sub = g_pts[m_c]
+            cx = float(np.median(sub[:, 0]))
+            cy = float(np.median(sub[:, 1]))
+            # Measure vertical leg column support directly above (cx, cy)
+            col_m = (
+                (np.hypot(pts[:, 0] - cx, pts[:, 1] - cy) <= 0.060 * height)
+                & (pts[:, 2] >= z_min + 0.12 * height)
+                & (pts[:, 2] <= z_min + 0.28 * height)
+            )
+            col_pts = int(col_m.sum())
+            if col_pts < 20:
+                continue
+            # Prefer components grounded near z_min with strong vertical column
+            z_pen = 1.0 / (1.0 + max(0.0, float(sub[:, 2].min()) - z_min) / (0.04 * height))
+            score = float(n_c) * float(col_pts) * z_pen
+            paw_clusters.append((score, cx, cy, sub))
 
-    # Symmetric X half-width for front and hind legs
-    def _leg_half_x(mask_y: np.ndarray, default_hw: float) -> float:
-        sub = paw_pts[mask_y]
-        if len(sub) < 20:
-            return default_hw
-        dx = np.abs(sub[:, 0] - mid_x)
-        return float(np.clip(np.percentile(dx, 65), 0.03 * height, 0.22 * height))
+    # Keep top 4 by leg-column score; if fewer than 4 (e.g. touching paws), split widest cluster along its major XY axis
+    paw_clusters.sort(key=lambda item: -item[0])
+    paw_clusters = paw_clusters[:4]
+    while 0 < len(paw_clusters) < 4:
+        # Pick cluster with largest horizontal span to split
+        best_idx = max(
+            range(len(paw_clusters)),
+            key=lambda i: float(np.ptp(paw_clusters[i][3][:, 0]) + np.ptp(paw_clusters[i][3][:, 1])),
+        )
+        sc_o, _, _, sub_o = paw_clusters.pop(best_idx)
+        xy_c = sub_o[:, :2] - np.median(sub_o[:, :2], axis=0, keepdims=True)
+        _, _, vt = np.linalg.svd(xy_c, full_matrices=False)
+        proj = xy_c @ vt[0]
+        med_p = float(np.median(proj))
+        for mask_half in (proj >= med_p, proj < med_p):
+            sh = sub_o[mask_half]
+            if len(sh) >= 4:
+                paw_clusters.append((sc_o * 0.5, float(np.median(sh[:, 0])), float(np.median(sh[:, 1])), sh))
+        if len(paw_clusters) < 2:
+            break
 
-    fl_hw = _leg_half_x(paw_pts[:, 1] <= y_leg_split, 0.075 * height)
-    hl_hw = _leg_half_x(paw_pts[:, 1] > y_leg_split, 0.085 * height)
+    if len(paw_clusters) == 4:
+        # Sort by Y ascending (-Y = front, +Y = hind); within each pair, higher X = Left (+X), lower X = Right (-X)
+        by_y = sorted(paw_clusters, key=lambda item: item[2])
+        front_pair = sorted(by_y[:2], key=lambda item: -item[1])
+        hind_pair = sorted(by_y[2:], key=lambda item: -item[1])
+        fl_x, fl_y = front_pair[0][1], front_pair[0][2]
+        fr_x, fr_y = front_pair[1][1], front_pair[1][2]
+        hl_x, hl_y = hind_pair[0][1], hind_pair[0][2]
+        hr_x, hr_y = hind_pair[1][1], hind_pair[1][2]
+        y_front_paws = 0.5 * (fl_y + fr_y)
+        y_hind_paws = 0.5 * (hl_y + hr_y)
+        fl_hw = max(0.5 * abs(fl_x - fr_x), 0.04 * height)
+        hl_hw = max(0.5 * abs(hl_x - hr_x), 0.04 * height)
+        if mid_x is None:
+            mid_x = 0.25 * (fl_x + fr_x + hl_x + hr_x)
+    else:
+        # Fallback to simple quadrant split if ground clusters were too sparse
+        paw_pts = g_pts
+        if mid_x is None:
+            low = pts[pts[:, 2] <= z_min + 0.55 * height]
+            mid_x = float(np.median(low[:, 0])) if len(low) >= 50 else float(np.median(pts[:, 0]))
+        y_leg_split = float(cfg.get("y_leg_split", np.median(paw_pts[:, 1])))
+        y_front_paws = float(np.percentile(paw_pts[paw_pts[:, 1] <= y_leg_split, 1], 35)) if np.any(paw_pts[:, 1] <= y_leg_split) else (y_leg_split - 0.15 * height)
+        y_hind_paws = float(np.percentile(paw_pts[paw_pts[:, 1] > y_leg_split, 1], 65)) if np.any(paw_pts[:, 1] > y_leg_split) else (y_leg_split + 0.15 * height)
+        fl_hw, hl_hw = 0.075 * height, 0.085 * height
+        fl_x, fl_y = mid_x + fl_hw, y_front_paws
+        fr_x, fr_y = mid_x - fl_hw, y_front_paws
+        hl_x, hl_y = mid_x + hl_hw, y_hind_paws
+        hr_x, hr_y = mid_x - hl_hw, y_hind_paws
 
     # Torso band above belly
     z_torso_lo = z_belly
     z_torso_hi = z_min + float(cfg.get("torso_top_frac", 0.64)) * height
-    core_x_lim = max(fl_hw, hl_hw) * 1.9 + 0.03 * height
+    core_x_lim = max(fl_hw, hl_hw) * 2.1 + 0.06 * height
     torso_pts = pts[
         (pts[:, 2] >= z_torso_lo) & (pts[:, 2] <= z_torso_hi)
         & (np.abs(pts[:, 0] - mid_x) <= core_x_lim)
-        & (pts[:, 1] >= y_front_paws - 0.18 * height)
-        & (pts[:, 1] <= y_hind_paws + 0.18 * height)
+        & (pts[:, 1] >= y_front_paws - 0.16 * height)
+        & (pts[:, 1] <= y_hind_paws + 0.16 * height)
     ]
     if len(torso_pts) < 60:
         torso_pts = pts[(pts[:, 2] >= z_torso_lo) & (pts[:, 2] <= z_torso_hi)]
@@ -286,29 +347,6 @@ def fit_quadruped_skeleton(
     p_head_tip = np.array([mid_x, float(0.35 * y_head_mid + 0.65 * y_snout), float(z_head_mid)], dtype=np.float32)
 
     # 3. Fit each of the 4 legs (hip/shoulder -> knee/elbow -> ankle/wrist -> paw)
-    # Use actual 2D paw clusters per front/hind half so slightly oblique or asymmetric stances
-    # (common in 3/4-view 3DGS generations) still place every leg bone inside real leg splats!
-    def _split_lr_paws(sub_pts: np.ndarray, default_y: float, default_hw: float) -> tuple[tuple[float, float], tuple[float, float]]:
-        if len(sub_pts) < 20:
-            return (mid_x + default_hw, default_y), (mid_x - default_hw, default_y)
-        x_med = float(np.median(sub_pts[:, 0]))
-        left_p = sub_pts[sub_pts[:, 0] >= x_med]
-        right_p = sub_pts[sub_pts[:, 0] < x_med]
-        lx = float(np.median(left_p[:, 0])) if len(left_p) >= 8 else (x_med + default_hw)
-        ly = float(np.median(left_p[:, 1])) if len(left_p) >= 8 else default_y
-        rx = float(np.median(right_p[:, 0])) if len(right_p) >= 8 else (x_med - default_hw)
-        ry = float(np.median(right_p[:, 1])) if len(right_p) >= 8 else default_y
-        return (lx, ly), (rx, ry)
-
-    # Exclude low-hanging rear tail splats when locating hind paws (keep Y <= y_hind_paws + 0.16*height)
-    front_paws = paw_pts[paw_pts[:, 1] <= y_leg_split]
-    hind_paws = paw_pts[(paw_pts[:, 1] > y_leg_split) & (paw_pts[:, 1] <= y_hind_paws + 0.16 * height)]
-    if len(hind_paws) < 20:
-        hind_paws = paw_pts[paw_pts[:, 1] > y_leg_split]
-
-    (fl_x, fl_y), (fr_x, fr_y) = _split_lr_paws(front_paws, y_front_paws, fl_hw)
-    (hl_x, hl_y), (hr_x, hr_y) = _split_lr_paws(hind_paws, y_hind_paws, hl_hw)
-
     def _fit_single_leg(x_nom: float, y_nom: float, is_front: bool, hip_z: float) -> list[np.ndarray]:
         z_top_leg = hip_z
         z_mid_leg = z_min + 0.50 * (z_top_leg - z_min)
@@ -316,8 +354,8 @@ def fit_quadruped_skeleton(
         z_paw_leg = z_min + 0.03 * height
 
         m_leg = (
-            (np.abs(pts[:, 0] - x_nom) <= 0.095 * height)
-            & (np.abs(pts[:, 1] - y_nom) <= 0.12 * height)
+            (np.abs(pts[:, 0] - x_nom) <= 0.065 * height)
+            & (np.abs(pts[:, 1] - y_nom) <= 0.085 * height)
             & (pts[:, 2] <= z_top_leg + 0.03 * height)
         )
         lpts = pts[m_leg]
