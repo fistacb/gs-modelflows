@@ -199,8 +199,38 @@ def fit_creature_face(
     if int(mL.sum()) < 8 or int(mR.sum()) < 8:
         raise RuntimeError(f"Asymmetric eye detection failed (L={int(mL.sum())}, R={int(mR.sum())})")
 
+    # Keep only the true eye connected component per side (rejects forehead/cheek orange markings!)
+    from scipy.spatial import cKDTree as _cKDTree
+    from scipy.sparse.csgraph import connected_components as _cc
+
+    def _pick_eye_component(mask_side: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        pts_s = ep[mask_side]
+        cols_s = ec[mask_side]
+        if len(pts_s) < 16:
+            return pts_s, cols_s
+        adj = _cKDTree(pts_s).sparse_distance_matrix(_cKDTree(pts_s), max_distance=0.018, output_type="coo_matrix")
+        n_c, lbls = _cc(adj, directed=False)
+        if n_c <= 1:
+            return pts_s, cols_s
+        lum_s = 0.299 * cols_s[:, 0] + 0.587 * cols_s[:, 1] + 0.114 * cols_s[:, 2]
+        best_cid, best_score = 0, -1.0
+        for cid in range(n_c):
+            mc = lbls == cid
+            if int(mc.sum()) < 8:
+                continue
+            # True eyes contain dark pupil/lash splats (lum < 0.36); forehead fur markings are brighter!
+            n_dark = int((lum_s[mc] < 0.36).sum())
+            score = float(n_dark) * 4.0 + float(mc.sum()) * 0.2
+            if score > best_score:
+                best_score, best_cid = score, cid
+        m_keep = lbls == best_cid
+        return pts_s[m_keep], cols_s[m_keep]
+
+    pts_L, col_L = _pick_eye_component(mL)
+    pts_R, col_R = _pick_eye_component(mR)
+
     # Sample iris gradient palette from detected eye splats
-    all_ec = np.concatenate([ec[mL], ec[mR]], axis=0)
+    all_ec = np.concatenate([col_L, col_R], axis=0)
     all_lum = 0.299 * all_ec[:, 0] + 0.587 * all_ec[:, 1] + 0.114 * all_ec[:, 2]
     q25, q55, q80 = np.percentile(all_lum, [25, 55, 80])
     top_c = np.median(all_ec[all_lum <= q25], axis=0) if np.any(all_lum <= q25) else np.median(all_ec, axis=0) * 0.45
@@ -219,21 +249,27 @@ def fit_creature_face(
     }
 
     eye_metas: dict[str, dict] = {}
-    for side, mask_s in (("eye_L", mL), ("eye_R", mR)):
-        pts_s = ep[mask_s]
+    for side, pts_s in (("eye_L", pts_L), ("eye_R", pts_R)):
         p10, p50, p90 = np.percentile(pts_s, [10, 50, 90], axis=0)
         span = p90 - p10
-        surf = np.array([float(p50[0]), float(np.percentile(pts_s[:, 1], 35)), float(0.5 * (p10[2] + p90[2]))], dtype=np.float32)
-        r_eye = float(np.clip(0.44 * max(float(span[0]), float(span[2])), 0.015, 0.028))
-        fit = _fit_local_face_quad(xyz, fur_mask, surf, r_eye, max_yaw_deg=32.0)
-        surf[1] = float(fit["skin_surface_y"])
+        # Anchor depth strictly on the actual eye surface Y (prevents protruding muzzle from pulling eye Y forward!)
+        y_eye_actual = float(np.percentile(pts_s[:, 1], 45))
+        surf = np.array([float(p50[0]), y_eye_actual, float(0.5 * (p10[2] + p90[2]))], dtype=np.float32)
 
-        # Place eyeball center behind fitted surface along inward normal so iris sits flush on curved cheek!
-        nrm = np.asarray(fit["normal"], dtype=np.float32)  # outward toward -Y
-        recess = r_eye * 0.16
-        eb_ctr = (surf - nrm * (r_eye + recess)).astype(np.float32)
-        carve_ctr = (surf - nrm * (r_eye * 0.12)).astype(np.float32)
-        excl_r = [float(max(span[0] * 0.48, r_eye * 0.78)), float(r_eye * 1.10), float(max(span[2] * 0.50, r_eye * 0.68))]
+        r_eye = float(np.clip(0.42 * max(float(span[0]), float(span[2])), 0.015, 0.025))
+        fit = _fit_local_face_quad(xyz, fur_mask, surf, r_eye, max_yaw_deg=26.0)
+        # Clamp fitted quad surface Y within +/-2mm of actual eye surface so muzzle NEVER pulls eyeballs out!
+        fitted_y = float(np.clip(fit["skin_surface_y"], y_eye_actual - 0.002, y_eye_actual + 0.002))
+        quad_coef = list(fit["quad_coef"])
+        quad_coef[0] = fitted_y
+        surf[1] = fitted_y
+
+        # Match humanoid step2_fit_skeleton rule: lock eyeball X/Z strictly to surface_center[0, 2]
+        # and recess purely along +Y so frontmost pole (eb_ctr[1] - r_eye) sits 3-4mm INSIDE face surface!
+        recess = max(r_eye * 0.18, 0.0035)
+        eb_ctr = np.array([float(surf[0]), float(fitted_y + r_eye + recess), float(surf[2])], dtype=np.float32)
+        carve_ctr = np.array([float(surf[0]), float(fitted_y + r_eye * 0.12), float(surf[2])], dtype=np.float32)
+        excl_r = [float(max(span[0] * 0.42, r_eye * 0.72)), float(r_eye * 1.05), float(max(span[2] * 0.34, r_eye * 0.48))]
 
         meta_s = {
             "detected_iris_points": int(len(pts_s)),
@@ -242,7 +278,7 @@ def fit_creature_face(
             "eyeball_radius": r_eye,
             "cheek_yaw_deg": float(fit["cheek_yaw_deg"]),
             "cheek_pitch_deg": float(fit["cheek_pitch_deg"]),
-            "face_quad_coef": fit["quad_coef"],
+            "face_quad_coef": quad_coef,
             "normal": fit["normal"],
             "carve_center": carve_ctr.tolist(),
             "exclusion_radius": excl_r,
@@ -252,7 +288,7 @@ def fit_creature_face(
         bones[side] = {
             "parent": "head",
             "head": eb_ctr.tolist(),
-            "tail": (eb_ctr + nrm * r_eye).tolist(),
+            "tail": [float(eb_ctr[0]), float(eb_ctr[1] - r_eye), float(eb_ctr[2])],
             "rest_quat_wxyz": list(IDENTITY_Q),
             "limits_deg": {"x": [-15, 14], "y": [0, 0], "z": [-24, 24]},
             "non_deforming": True,
@@ -378,7 +414,8 @@ def build_creature_eyeball(
     az = np.degrees(np.arctan2(normals[:, 0], front_y))
     el = np.degrees(np.arcsin(np.clip(normals[:, 2], -1.0, 1.0)))
 
-    rx_deg, rz_deg = 54.0, 58.0
+    # Large, soft anime/fox iris (eliminates wide-eyed white-ring / sanpaku stare!)
+    rx_deg, rz_deg = 62.0, 60.0
     r_iris = np.hypot(az / rx_deg, el / rz_deg)
     in_front = normals[:, 1] < -0.10
 
@@ -388,25 +425,31 @@ def build_creature_eyeball(
         pal["bot"][None, :] * (1.0 - (v_t * 2.0)[:, None]) + pal["mid"][None, :] * (v_t * 2.0)[:, None],
         pal["mid"][None, :] * (1.0 - ((v_t - 0.5) * 2.0)[:, None]) + pal["top"][None, :] * ((v_t - 0.5) * 2.0)[:, None],
     )
-    # Warm lower-iris glow crescent
-    glow_m = _smoothstep(0.42, 0.14, v_t) * _smoothstep(0.95, 0.55, r_iris)
-    iris_rgb = iris_rgb * (1.0 - 0.55 * glow_m[:, None]) + pal["glow"][None, :] * (0.55 * glow_m[:, None])
+    # Warm golden lower-iris glow crescent
+    glow_m = _smoothstep(0.48, 0.14, v_t) * _smoothstep(0.95, 0.48, r_iris)
+    iris_rgb = iris_rgb * (1.0 - 0.62 * glow_m[:, None]) + pal["glow"][None, :] * (0.62 * glow_m[:, None])
 
-    # Dark outer iris rim & soft vertical cat/fox pupil
-    rim_m = _smoothstep(0.76, 0.96, r_iris) * _smoothstep(1.06, 0.98, r_iris)
-    iris_rgb = iris_rgb * (1.0 - 0.72 * rim_m[:, None]) + pal["rim"][None, :] * (0.72 * rim_m[:, None])
-    r_pupil = np.hypot(az / 11.0, (el - 2.0) / 20.0)  # subtle feline/fox vertical oval pupil
-    pupil_m = _smoothstep(1.05, 0.65, r_pupil)
-    iris_rgb = iris_rgb * (1.0 - 0.85 * pupil_m[:, None]) + pal["pupil"][None, :] * (0.85 * pupil_m[:, None])
+    # Soft upper-eyelid shadow across top of iris & sclera for gentle, cute expression
+    top_shadow = _smoothstep(0.55, 0.92, v_t)
+    iris_rgb = iris_rgb * (1.0 - 0.42 * top_shadow[:, None])
 
-    # Crisp dual anime catchlights
-    h1 = _smoothstep(12.0, 4.5, np.hypot(az - 14.0, el - 16.0))
-    h2 = _smoothstep(7.0, 2.5, np.hypot(az + 14.0, el + 15.0))
-    hl = np.clip(h1 + 0.75 * h2, 0.0, 1.0)
+    # Soft outer iris rim & cute rounded-oval pupil
+    rim_m = _smoothstep(0.78, 0.96, r_iris) * _smoothstep(1.06, 0.98, r_iris)
+    iris_rgb = iris_rgb * (1.0 - 0.65 * rim_m[:, None]) + pal["rim"][None, :] * (0.65 * rim_m[:, None])
+    r_pupil = np.hypot(az / 17.0, (el - 2.0) / 22.0)
+    pupil_m = _smoothstep(1.05, 0.55, r_pupil)
+    iris_rgb = iris_rgb * (1.0 - 0.80 * pupil_m[:, None]) + pal["pupil"][None, :] * (0.80 * pupil_m[:, None])
+
+    # Big warm anime catchlights
+    h1 = _smoothstep(15.0, 5.5, np.hypot(az - 16.0, el - 14.0))
+    h2 = _smoothstep(8.5, 3.0, np.hypot(az + 16.0, el + 14.0))
+    hl = np.clip(h1 + 0.78 * h2, 0.0, 1.0)
     iris_rgb = iris_rgb * (1.0 - hl[:, None]) + np.array([1.0, 0.99, 0.97], dtype=np.float32)[None, :] * hl[:, None]
 
-    iris_blend = np.where(in_front, _smoothstep(1.04, 0.92, r_iris), 0.0)
-    rgb = sclera_rgb[None, :] * (1.0 - iris_blend[:, None]) + iris_rgb * iris_blend[:, None]
+    # Soften sclera slightly with upper lid shadow so whites never look harsh
+    sclera_shaded = sclera_rgb[None, :] * (1.0 - 0.16 * top_shadow[:, None])
+    iris_blend = np.where(in_front, _smoothstep(1.04, 0.90, r_iris), 0.0)
+    rgb = sclera_shaded * (1.0 - iris_blend[:, None]) + iris_rgb * iris_blend[:, None]
     rgb = np.clip(rgb, 0.0, 1.0).astype(np.float32)
 
     normals_w = (normals @ R_align.T).astype(np.float32)
@@ -476,9 +519,9 @@ def build_creature_eyelid_shell(
     y_surf = c0 + c1 * dx + c2 * dz + c3 * dx * dx + c4 * dx * dz + c5 * dz * dz - 0.0022
     pts = np.column_stack([sc[0] + dx, y_surf, sc[2] + dz]).astype(np.float32)
 
-    # Color: face fur on upper curtain, dark lash stroke along the descending lower rim
+    # Color: face fur on upper curtain, gentle dark lash stroke along the descending lower rim
     dist_to_edge = np.abs(dz - z_cur_edge)
-    lash_thick = max(rz * 0.14, 0.0028)
+    lash_thick = max(rz * 0.22, 0.0026)
     is_lash = _smoothstep(lash_thick, lash_thick * 0.35, dist_to_edge)
     fur_c = np.asarray(fur_rgb, dtype=np.float32)
     lash_c = np.asarray(lash_rgb, dtype=np.float32)
