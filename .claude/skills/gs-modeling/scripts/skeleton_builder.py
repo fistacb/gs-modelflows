@@ -126,11 +126,13 @@ def add_chain(
         dyn_i = None
         if dynamics is not None:
             dyn_i = copy.deepcopy(dynamics)
-            if n_seg > 1 and dynamics_tip_boost != 1.0:
+            if n_seg > 1:
                 frac = i / max(n_seg - 1, 1)
-                # Distal segments are slightly looser & more responsive
-                dyn_i["stiffness"] = float(dyn_i.get("stiffness", 20.0)) * (1.0 - 0.35 * frac)
-                dyn_i["max_angle_deg"] = float(dyn_i.get("max_angle_deg", 30.0)) * (1.0 + (dynamics_tip_boost - 1.0) * frac)
+                # Root segments stay firm & anchored; distal tips flex progressively more
+                root_scale = 0.45 + 0.55 * frac
+                dyn_i["stiffness"] = float(dyn_i.get("stiffness", 36.0)) * (1.35 - 0.50 * frac)
+                dyn_i["inertia"] = float(dyn_i.get("inertia", 0.50)) * root_scale
+                dyn_i["max_angle_deg"] = float(dyn_i.get("max_angle_deg", 12.0)) * (root_scale * (1.0 + (dynamics_tip_boost - 1.0) * frac))
         bones[bname] = make_bone(
             cur_parent,
             pts[i],
@@ -363,6 +365,7 @@ def fit_quadruped_skeleton(
         "neck": make_bone("chest", p_neck_base, p_head_base, skin_group="torso", role="neck",
                           limits_deg={"x": [-35, 35], "y": [-25, 25], "z": [-40, 40]}),
         "head": make_bone("neck", p_head_base, p_head_tip, skin_group="head", role="head", rigid=True,
+                          influence_radius_scale=1.45,
                           limits_deg={"x": [-35, 35], "y": [-25, 25], "z": [-45, 45]}),
     }
 
@@ -454,14 +457,20 @@ def add_jaw_bone(
         "radius": cut_r,
         "keep_side": -1.0,
     }
+    jaw_box = {
+        "min": [float(p_tip[0]) - cut_r, float(p_tip[1]) - 0.04, float(min(p_hinge[2], p_tip[2])) - 0.045],
+        "max": [float(p_tip[0]) + cut_r, float(p_hinge[1]) + 0.015, cut_z + 0.002],
+    }
     bones["jaw"] = make_bone(
         parent,
         p_hinge,
         p_tip,
         skin_group="jaw",
         role="jaw",
-        pin_radius=max(jaw_len * 0.45, 0.018),
-        limits_deg={"x": [-abs(max_open_deg), 6.0], "y": [-5.0, 5.0], "z": [-8.0, 8.0]},
+        pin_radius=max(jaw_len * 0.40, 0.018),
+        influence_radius_scale=1.15,
+        region_box=jaw_box,
+        limits_deg={"x": [-abs(max_open_deg), 4.0], "y": [-3.0, 3.0], "z": [-5.0, 5.0]},
         seam_cut=seam_cut,
     )
     return "jaw"
@@ -485,11 +494,13 @@ def add_wing_bones(
     pts = np.asarray(xyz, dtype=np.float32)
 
     dyn_tip = dynamics if dynamics is not None else {
-        "stiffness": 24.0,
-        "damping": 0.30,
-        "gravity": 0.08,
-        "wind_scale": 1.2,
-        "max_angle_deg": 24.0,
+        "preset": "wing_tip",
+        "stiffness": 52.0,
+        "damping": 0.70,
+        "gravity": 0.0,
+        "wind_scale": 0.22,
+        "inertia": 0.42,
+        "max_angle_deg": 11.0,
     }
 
     created: list[str] = []
@@ -524,7 +535,8 @@ def add_wing_bones(
         w_pts = pts[((pts[:, 0] - mid_x) * sgn > 0.03) & (pts[:, 2] >= p_chest[2] - 0.05)]
         chain_pts = _trace_protrusion_chain(w_pts, r_s, t_s, n_segments=n_segments, radius=0.09)
 
-        # Build wing chain: base & mid are keyframe-driven; distal tip gets optional secondary motion
+        # Build wing chain as articulated skeletal bones (humerus -> radius/ulna -> carpometacarpus).
+        # Wings have rigid bones inside, so do NOT apply cloth-like dynamics by default.
         cur_parent = parent
         for i in range(n_segments):
             bname = f"wing_{s}_{i + 1}"
@@ -537,8 +549,8 @@ def add_wing_bones(
                 role="wing",
                 side_lock=s,
                 influence_radius_scale=1.25,
-                limits_deg={"x": [-55, 55], "y": [-65, 65], "z": [-55, 55]},
-                dynamics=dyn_tip if is_tip else None,
+                limits_deg={"x": [-45, 45], "y": [-70, 70], "z": [-45, 45]},
+                dynamics=dynamics if (dynamics is not None and is_tip) else None,
             )
             created.append(bname)
             cur_parent = bname
@@ -579,11 +591,13 @@ def add_tail_bones(
     t_pts = pts[pts[:, 1] >= r_p[1] - 0.02]
     chain_pts = _trace_protrusion_chain(t_pts, r_p, t_p, n_segments=n_segments, radius=0.11)
     dyn = dynamics if dynamics is not None else {
-        "stiffness": 14.0,
-        "damping": 0.24,
-        "gravity": 0.16,
-        "wind_scale": 1.3,
-        "max_angle_deg": 32.0,
+        "preset": "tail",
+        "stiffness": 28.0,
+        "damping": 0.76,
+        "gravity": 0.0,
+        "wind_scale": 0.28,
+        "inertia": 0.52,
+        "max_angle_deg": 11.0,
     }
     return add_chain(
         bones,
@@ -593,9 +607,9 @@ def add_tail_bones(
         skin_group="tail",
         role="tail",
         influence_radius_scale=1.35,
-        limits_deg={"x": [-45, 45], "y": [-35, 35], "z": [-55, 55]},
+        limits_deg={"x": [-22, 22], "y": [-18, 18], "z": [-28, 28]},
         dynamics=dyn,
-        dynamics_tip_boost=1.35,
+        dynamics_tip_boost=1.25,
     )
 
 
@@ -635,11 +649,13 @@ def add_ear_bones(
             t_L = np.array([mid_x + 0.08, float(h_head[1] + 0.02), head_z_ref + 0.15], dtype=np.float32)
 
     dyn = dynamics if dynamics is not None else {
-        "stiffness": 28.0,
-        "damping": 0.26,
-        "gravity": 0.06,
-        "wind_scale": 0.9,
-        "max_angle_deg": 24.0,
+        "preset": "ear",
+        "stiffness": 70.0,
+        "damping": 0.75,
+        "gravity": 0.0,
+        "wind_scale": 0.12,
+        "inertia": 0.28,
+        "max_angle_deg": 7.0,
     }
     created: list[str] = []
     for s, sgn in (("L", +1.0), ("R", -1.0)):
@@ -649,6 +665,12 @@ def add_ear_bones(
             pts[((pts[:, 0] - mid_x) * sgn > 0.01) & (pts[:, 2] >= r_s[2] - 0.01)],
             r_s, t_s, n_segments=n_segments, radius=0.045,
         )
+        # Strictly confine ear influence above the ear base Z so eyes/face/cranium stay 100% rigid on `head`!
+        ear_z_floor = float(r_s[2]) - 0.005
+        ear_box = {
+            "min": [mid_x - 0.01 if s == "L" else -10.0, -10.0, ear_z_floor],
+            "max": [10.0 if s == "L" else mid_x + 0.01, 10.0, 10.0],
+        }
         created.extend(add_chain(
             bones,
             f"ear_{s}",
@@ -657,9 +679,12 @@ def add_ear_bones(
             skin_group=f"ear_{s}",
             role="ear",
             side_lock=s,
-            limits_deg={"x": [-35, 35], "y": [-30, 30], "z": [-25, 25]},
+            pin_radius=0.024,
+            influence_radius_scale=0.85,
+            region_box=ear_box,
+            limits_deg={"x": [-10, 10], "y": [-8, 8], "z": [-8, 8]},
             dynamics=dyn,
-            dynamics_tip_boost=1.3,
+            dynamics_tip_boost=1.2,
         ))
     return created
 
@@ -685,11 +710,13 @@ def add_cape_or_skirt_bones(
     z_hem = max(z_hip - 0.16, 0.18)
 
     dyn = dynamics if dynamics is not None else {
-        "stiffness": 15.0,
-        "damping": 0.26,
-        "gravity": 0.30,
-        "wind_scale": 1.4,
-        "max_angle_deg": 28.0,
+        "preset": "cape",
+        "stiffness": 34.0,
+        "damping": 0.70,
+        "gravity": 0.0,
+        "wind_scale": 0.42,
+        "inertia": 0.50,
+        "max_angle_deg": 12.0,
     }
     created: list[str] = []
     for name in names:
@@ -716,6 +743,12 @@ def add_cape_or_skirt_bones(
             t_p = np.array([mid_x + dx * 1.15, float(p_base[1] + 0.095), z_hem], dtype=np.float32)
 
         chain_pts = _trace_protrusion_chain(cand, r_p, t_p, n_segments=n_segments, radius=0.055)
+        # Restrict cape bones strictly to the rear outer shell (+Y behind torso/skirt) so inner dress never gets pulled
+        cape_y_min = float(p_base[1]) + 0.032
+        cape_box = {
+            "min": [-10.0, cape_y_min, z_hem - 0.06],
+            "max": [10.0, 10.0, float(p_base[2]) + 0.06],
+        }
         created.extend(add_chain(
             bones,
             name,
@@ -724,10 +757,12 @@ def add_cape_or_skirt_bones(
             skin_group=name,
             role="cloth",
             side_lock=side_lock,
-            pin_radius=0.030,
-            limits_deg={"x": [-35, 35], "y": [-25, 25], "z": [-25, 25]},
+            pin_radius=0.026,
+            influence_radius_scale=0.85,
+            region_box=cape_box,
+            limits_deg={"x": [0, 18], "y": [-10, 10], "z": [-10, 10]},
             dynamics=dyn,
-            dynamics_tip_boost=1.35,
+            dynamics_tip_boost=1.25,
         ))
     return created
 
@@ -751,13 +786,27 @@ def add_ribbon_or_hair_bones(
     mid_x = float(p_base[0])
     pts = np.asarray(xyz, dtype=np.float32)
 
-    dyn = dynamics if dynamics is not None else {
-        "stiffness": 14.0,
-        "damping": 0.22,
-        "gravity": 0.32,
-        "wind_scale": 1.6,
-        "max_angle_deg": 38.0,
-    }
+    dyn = dynamics if dynamics is not None else (
+        {
+            "preset": "hair",
+            "stiffness": 36.0,
+            "damping": 0.68,
+            "gravity": 0.0,
+            "wind_scale": 0.45,
+            "inertia": 0.55,
+            "max_angle_deg": 13.0,
+        }
+        if role == "hair"
+        else {
+            "preset": "ribbon",
+            "stiffness": 24.0,
+            "damping": 0.58,
+            "gravity": 0.0,
+            "wind_scale": 0.75,
+            "inertia": 0.68,
+            "max_angle_deg": 16.0,
+        }
+    )
 
     if root_L is None or tip_L is None:
         # Default placement: slightly forward/below chest (for ribbons) or rearward/below head (for hair)

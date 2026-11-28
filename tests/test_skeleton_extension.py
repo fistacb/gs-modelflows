@@ -136,7 +136,7 @@ def test_secondary_motion_solver_stability():
     solver = SecondaryMotionSolver(bones, order)
     assert "tail_1" in solver.dynamic_bones
     assert "ear_L_1" in solver.dynamic_bones
-    assert "wing_L_3" in solver.dynamic_bones
+    assert "wing_L_3" not in solver.dynamic_bones  # wings are articulated bones by default, not cloth
 
     frames_rots = []
     frames_shifts = []

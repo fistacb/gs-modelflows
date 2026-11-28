@@ -82,38 +82,56 @@ def build_choreography(bones: dict, archetype: str, fps: int = 12):
             for s, sgn in (("L", +1.0), ("R", -1.0)):
                 if f"wing_{s}_1" in bones:
                     rots[f"wing_{s}_1"] = euler_xyz(ry_deg=sgn * flap)
-        wind = np.array([0.15 * math.sin(2 * math.pi * t), 0.55, 0.0], dtype=np.float32)
+        wind = np.array([0.4 * math.sin(2 * math.pi * t), 1.0, 0.0], dtype=np.float32)
         yaw = -35.0 if archetype == "quadruped" else 25.0
         lbl = "1. JAW & WIND IDLE" if has_jaw else "1. WIND & SECONDARY MOTION"
         frames.append((lbl, yaw, 10.0, rots, np.zeros(3, dtype=np.float32), wind))
 
-    # 2. Wing Flap Showcase (if winged) or Torso/Cape Sway (24 frames)
+    # 2. Wing Flap Showcase (anatomical bone-driven flap) or Torso/Cape Sway (24 frames)
     for i in range(24):
         t = i / 24.0
         rots = {}
         phase = 2 * math.pi * t * 2.0
         if has_wings:
+            # Anatomical bird/creature wing stroke:
+            # - wing_1 (humerus/shoulder): clean up/down stroke around Y + slight forward sweep on downstroke
+            # - wing_2 (elbow/forearm): folds slightly on upstroke, extends straight on downstroke
+            # - wing_3 (wrist/primaries): crisp feathering pitch (X) on upstroke recovery
+            upstroke = max(0.0, math.sin(phase))
+            downstroke = max(0.0, -math.sin(phase))
             for s, sgn in (("L", +1.0), ("R", -1.0)):
                 if f"wing_{s}_1" in bones:
-                    rots[f"wing_{s}_1"] = euler_xyz(ry_deg=sgn * (32.0 * math.sin(phase)), rz_deg=sgn * (-10.0 * math.cos(phase)))
+                    rots[f"wing_{s}_1"] = euler_xyz(
+                        rx_deg=6.0 * downstroke,
+                        ry_deg=sgn * (28.0 * math.sin(phase)),
+                        rz_deg=sgn * (-8.0 * downstroke + 6.0 * upstroke),
+                    )
                 if f"wing_{s}_2" in bones:
-                    rots[f"wing_{s}_2"] = euler_xyz(ry_deg=sgn * (24.0 * math.sin(phase - 0.55)))
+                    rots[f"wing_{s}_2"] = euler_xyz(
+                        ry_deg=sgn * (-14.0 * upstroke + 6.0 * downstroke),
+                        rz_deg=sgn * (14.0 * upstroke),
+                    )
+                if f"wing_{s}_3" in bones:
+                    rots[f"wing_{s}_3"] = euler_xyz(
+                        rx_deg=-16.0 * upstroke,
+                        ry_deg=sgn * (-8.0 * upstroke),
+                    )
             if "chest" in bones:
-                rots["chest"] = euler_xyz(rx_deg=6.0 * math.cos(phase))
-            shift = np.array([0.0, 0.0, 0.035 * (0.5 - 0.5 * math.cos(phase))], dtype=np.float32)
-            yaw = -55.0 + 30.0 * math.sin(2 * math.pi * t)
-            lbl = "2. WING FLAP + TIP DYNAMICS"
+                rots["chest"] = euler_xyz(rx_deg=4.0 * math.cos(phase))
+            shift = np.array([0.0, 0.0, 0.025 * (0.5 - 0.5 * math.cos(phase))], dtype=np.float32)
+            yaw = -55.0 + 25.0 * math.sin(2 * math.pi * t)
+            lbl = "2. ARTICULATED WING FLAP"
         else:
             if "spine_lower" in bones:
-                rots["spine_lower"] = euler_xyz(rz_deg=18.0 * math.sin(phase), ry_deg=6.0 * math.cos(phase))
+                rots["spine_lower"] = euler_xyz(rz_deg=14.0 * math.sin(phase), ry_deg=4.0 * math.cos(phase))
             if "chest" in bones:
-                rots["chest"] = euler_xyz(rz_deg=14.0 * math.sin(phase))
+                rots["chest"] = euler_xyz(rz_deg=10.0 * math.sin(phase))
             if "head" in bones:
-                rots["head"] = euler_xyz(rz_deg=-12.0 * math.sin(phase))
-            shift = np.array([0.0, 0.0, 0.02 * abs(math.sin(phase))], dtype=np.float32)
+                rots["head"] = euler_xyz(rz_deg=-10.0 * math.sin(phase))
+            shift = np.array([0.0, 0.0, 0.015 * abs(math.sin(phase))], dtype=np.float32)
             yaw = 145.0  # Rear 3/4 view to showcase cape/hair sway
             lbl = "2. SWAY & CLOTH DYNAMICS"
-        wind = np.array([0.25 * math.cos(phase), 0.75, 0.0], dtype=np.float32)
+        wind = np.array([0.5 * math.cos(phase), 1.4, 0.0], dtype=np.float32)
         frames.append((lbl, yaw, 12.0, rots, shift, wind))
 
     # 3. Locomotion (Quadruped Trot or Humanoid Walk) (24 frames)
@@ -154,7 +172,7 @@ def build_choreography(bones: dict, archetype: str, fps: int = 12):
             shift = np.zeros(3, dtype=np.float32)
             yaw = -40.0
             lbl = "3. TURNTABLE"
-        wind = np.array([0.0, 0.90, 0.0], dtype=np.float32)
+        wind = np.array([0.0, 1.8, 0.0], dtype=np.float32)
         frames.append((lbl, yaw, 10.0, rots, shift, wind))
 
     return frames
