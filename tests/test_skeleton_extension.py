@@ -21,6 +21,11 @@ from harmonic_dqs import (
     pack_spark_skin_weights,
 )
 from secondary_motion import SecondaryMotionSolver
+from procedural_locomotion import (
+    avian_wingbeat_frame,
+    quadruped_gait_frame,
+    solve_two_bone_ik,
+)
 from skeleton_builder import (
     add_jaw_bone,
     build_skeleton_from_recipe,
@@ -165,7 +170,41 @@ def test_secondary_motion_solver_stability():
             assert np.isfinite(R_w).all() and np.isfinite(h_w).all() and np.isfinite(t_w).all()
 
 
+def test_procedural_locomotion_ik_and_flight():
+    # 1. Analytical 2-Bone IK exact reach test
+    p_root = np.array([0.1, -0.2, 0.5], dtype=np.float32)
+    R_par = euler_xyz(rx_deg=8.0, rz_deg=-10.0)
+    v1 = np.array([0.0, 0.0, -0.22], dtype=np.float32)
+    v2 = np.array([0.0, 0.0, -0.20], dtype=np.float32)
+    p_target = np.array([0.12, -0.28, 0.14], dtype=np.float32)
+    pole = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+    R1, R2 = solve_two_bone_ik(p_root, R_par, v1, v2, p_target, pole)
+    R_w1 = R_par @ R1
+    p_mid = p_root + R_w1 @ v1
+    p_end = p_mid + (R_w1 @ R2) @ v2
+    np.testing.assert_allclose(p_end, p_target, atol=1e-4)
+
+    # 2. Quadruped WALK / TROT / GALLOP + Avian FLY smoke test
+    xyz = _make_synthetic_quadruped_cloud()
+    skel = build_skeleton_from_recipe(xyz, {
+        "archetype": "quadruped",
+        "attachments": [{"type": "wing", "n_segments": 3}, {"type": "tail", "n_segments": 3}],
+    })
+    bones = skel["bones"]
+    order = build_fk_hierarchy(bones)
+    for gait in ("walk", "trot", "gallop"):
+        for ph in (0.0, 0.25, 0.5, 0.75):
+            rots, shift = quadruped_gait_frame(bones, order, ph, gait=gait)
+            assert np.isfinite(shift).all()
+            assert "front_upper_L" in rots and "hind_lower_R" in rots
+    for ph in (0.0, 0.3, 0.6, 0.9):
+        rots, shift = avian_wingbeat_frame(bones, ph)
+        assert np.isfinite(shift).all()
+        assert "wing_L_1" in rots and "wing_R_3" in rots
+
+
 if __name__ == "__main__":
     test_quadruped_recipe_and_generic_skinning()
     test_secondary_motion_solver_stability()
+    test_procedural_locomotion_ik_and_flight()
     print("ALL SKELETON EXTENSION UNIT TESTS PASSED!")
