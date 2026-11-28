@@ -564,33 +564,66 @@ def carve_creature_sockets(data: np.ndarray, face_meta: dict[str, Any]) -> np.nd
         ).astype(np.float32)
         loc = (xyz_o - cc[None, :]) @ R_align
 
-        z_halo = float(er[2] * 1.75) if has_brow else float(max(er[2] * 2.15, r_eye * 1.60))
+        z_halo = float(er[2] * 1.75) if has_brow else float(max(er[2] * 2.25, r_eye * 1.65))
+        # (a) General soft halo around upper/side eye border
         r_halo = np.sqrt(
-            (loc[:, 0] / max(er[0] * 2.05, 1e-4)) ** 2
-            + (loc[:, 1] / max(er[1] * 1.65, 1e-4)) ** 2
+            (loc[:, 0] / max(er[0] * 2.15, 1e-4)) ** 2
+            + (loc[:, 1] / max(er[1] * 1.75, 1e-4)) ** 2
             + (loc[:, 2] / max(z_halo, 1e-4)) ** 2
         )
-        # Soft radial, lower-cheek, and upper-brow weights
-        w_rad = _smoothstep(1.05, 0.62, r_halo)
-        w_low = _smoothstep(-er[2] * 1.15, -er[2] * 0.35, loc[:, 2])
+        w_rad = _smoothstep(1.08, 0.65, r_halo)
+        w_low = _smoothstep(-er[2] * 1.35, -er[2] * 0.45, loc[:, 2])
         w_top = _smoothstep(dz_brow_floor * 1.02, dz_brow_floor * 0.72, loc[:, 2])
         w_col = _smoothstep(0.12, 0.24, d_fur_o)
-        alpha = (w_rad * w_low * w_top * w_col * 0.92).astype(np.float32)
+        alpha_halo = w_rad * w_low * w_top * w_col * 0.94
+
+        # (b) Outer/inner dark eye-corner liner remnants (lum < 0.60): clean thoroughly into fur
+        lum_o = 0.299 * rgb_o[:, 0] + 0.587 * rgb_o[:, 1] + 0.114 * rgb_o[:, 2]
+        r_corner = np.sqrt(
+            (loc[:, 0] / max(er[0] * 2.45, 1e-4)) ** 2
+            + (loc[:, 1] / max(er[1] * 1.85, 1e-4)) ** 2
+            + (loc[:, 2] / max(z_halo, 1e-4)) ** 2
+        )
+        w_dark_corner = (
+            _smoothstep(1.05, 0.72, r_corner)
+            * _smoothstep(-er[2] * 1.75, -er[2] * 1.15, loc[:, 2])
+            * w_top
+            * _smoothstep(0.62, 0.44, lum_o)
+            * _smoothstep(0.16, 0.26, d_fur_o)
+            * 0.97
+        )
+
+        # (c) Directly-under-eye lower-lid highlight / shadow rim (preserves outer cheek blush!)
+        w_under_x = _smoothstep(er[0] * 1.55, er[0] * 1.05, np.abs(loc[:, 0]))
+        w_under_y = _smoothstep(er[1] * 1.75, er[1] * 1.15, np.abs(loc[:, 1]))
+        w_under_z = _smoothstep(-er[2] * 1.85, -er[2] * 1.15, loc[:, 2]) * _smoothstep(er[2] * 0.25, -er[2] * 0.15, loc[:, 2])
+        w_under = w_under_x * w_under_y * w_under_z * _smoothstep(0.14, 0.26, d_fur_o) * 0.90
+
+        alpha = np.maximum.reduce([alpha_halo, w_dark_corner, w_under]).astype(np.float32)
 
         m_blend = alpha > 0.03
         if not np.any(m_blend):
             continue
 
-        # Sample local surrounding bright fur color so lighting/shading matches the cheek seamlessly
-        m_local_fur = (d_fur_o < 0.20) & (np.linalg.norm(xyz_o - cc[None, :], axis=1) < max(er[0] * 3.5, 0.09))
+        # Sample local surrounding bright fur color with subtle natural fur luminance variation
+        m_local_fur = (d_fur_o < 0.18) & (np.linalg.norm(xyz_o - cc[None, :], axis=1) < max(er[0] * 3.8, 0.10))
         if int(m_local_fur.sum()) >= 16:
             tree = _cKDTree(xyz_o[m_local_fur])
-            _, nn = tree.query(xyz_o[m_blend], k=min(8, int(m_local_fur.sum())))
+            dists, nn = tree.query(xyz_o[m_blend], k=min(6, int(m_local_fur.sum())))
             if nn.ndim == 1:
                 nn = nn[:, None]
-            target_rgb = np.median(rgb_o[m_local_fur][nn], axis=1).astype(np.float32)
+                dists = dists[:, None]
+            w_inv = 1.0 / np.maximum(dists, 1e-4)
+            w_inv /= np.sum(w_inv, axis=1, keepdims=True)
+            target_rgb = np.sum(rgb_o[m_local_fur][nn] * w_inv[:, :, None], axis=1).astype(np.float32)
         else:
-            target_rgb = np.broadcast_to(fur_rgb[None, :], (int(m_blend.sum()), 3))
+            target_rgb = np.broadcast_to(fur_rgb[None, :], (int(m_blend.sum()), 3)).copy()
+
+        # Preserve subtle +/-2.5% natural fur shading variation so recolored area looks like soft fur, not flat plastic
+        orig_lum_m = lum_o[m_blend]
+        tgt_lum_m = 0.299 * target_rgb[:, 0] + 0.587 * target_rgb[:, 1] + 0.114 * target_rgb[:, 2]
+        micro_var = np.clip((orig_lum_m - tgt_lum_m) * 0.08, -0.025, 0.025)[:, None]
+        target_rgb = np.clip(target_rgb + micro_var, 0.0, 1.0)
 
         a_m = alpha[m_blend][:, None]
         rgb_o[m_blend] = rgb_o[m_blend] * (1.0 - a_m) + target_rgb * a_m
