@@ -264,12 +264,14 @@ def _compute_generic_harmonic_skin_weights(
         else:
             mid_x = float(np.median(bxyz[:, 0]))
 
-    # Collect all seam cuts (both top-level and per-bone)
+    # Collect all seam cuts (both top-level and per-bone; per-bone may be a single dict or a list of dicts)
     all_cuts: list[dict] = list(seam_cuts) if seam_cuts else []
     for bname in skin_bones:
         sc = bones[bname].get("seam_cut")
         if isinstance(sc, dict):
             all_cuts.append(sc)
+        elif isinstance(sc, list):
+            all_cuts.extend(c for c in sc if isinstance(c, dict))
 
     tree = cKDTree(bxyz)
     dists_knn, idx_knn = tree.query(bxyz, k=min(13, nb), workers=-1)
@@ -330,9 +332,12 @@ def _compute_generic_harmonic_skin_weights(
             outside = np.any((bxyz < rmin[None, :]) | (bxyz > rmax[None, :]), axis=1)
             d = np.where(outside, d + 0.80, d)
 
-        # Per-bone seam_cut sidedness (e.g. jaw keeps keep_side=-1 below mouth plane; parent head keeps +1)
-        sc = b.get("seam_cut")
-        if isinstance(sc, dict) and "origin" in sc and "normal" in sc:
+        # Per-bone seam_cut sidedness (supports a single dict or a list of dicts)
+        sc_raw = b.get("seam_cut")
+        sc_list = [sc_raw] if isinstance(sc_raw, dict) else (sc_raw if isinstance(sc_raw, list) else [])
+        for sc in sc_list:
+            if not isinstance(sc, dict) or "origin" not in sc or "normal" not in sc:
+                continue
             o = np.asarray(sc["origin"], dtype=np.float32)
             n = np.asarray(sc["normal"], dtype=np.float32)
             n = n / max(float(np.linalg.norm(n)), 1e-8)
@@ -350,13 +355,20 @@ def _compute_generic_harmonic_skin_weights(
 
         dists[:, bi] = d
 
-    # Also penalize parent bone on the child's side of a seam_cut (e.g. head penalized on jaw's lower mouth side)
+    # Also penalize parent bone on the child's side of a seam_cut when `affect_parent` is True (default True for jaw)
     for bi, bname in enumerate(skin_bones):
         b = bones[bname]
-        sc = b.get("seam_cut")
+        sc_raw = b.get("seam_cut")
+        sc_list = [sc_raw] if isinstance(sc_raw, dict) else (sc_raw if isinstance(sc_raw, list) else [])
         parent = b.get("parent")
-        if isinstance(sc, dict) and parent in skin_bones and "origin" in sc and "normal" in sc:
-            p_idx = skin_bones.index(parent)
+        if parent not in skin_bones:
+            continue
+        p_idx = skin_bones.index(parent)
+        for sc in sc_list:
+            if not isinstance(sc, dict) or not sc.get("affect_parent", True):
+                continue
+            if "origin" not in sc or "normal" not in sc:
+                continue
             o = np.asarray(sc["origin"], dtype=np.float32)
             n = np.asarray(sc["normal"], dtype=np.float32)
             n = n / max(float(np.linalg.norm(n)), 1e-8)

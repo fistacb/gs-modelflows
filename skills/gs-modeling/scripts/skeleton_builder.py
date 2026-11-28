@@ -369,36 +369,79 @@ def fit_quadruped_skeleton(
                           limits_deg={"x": [-35, 35], "y": [-25, 25], "z": [-45, 45]}),
     }
 
+    # Compute automatic inter-leg bisector seam cuts (separates close L/R legs even on oblique stances)
+    # and a hind-leg / tail rear barrier so low-hanging tails NEVER stretch when hind legs stride!
+    def _leg_bisector_cut(pL: np.ndarray, pR: np.ndarray, z_hi: float, side_keep: float) -> dict | None:
+        dv = np.array([float(pL[0] - pR[0]), float(pL[1] - pR[1]), 0.0], dtype=np.float32)
+        dist_lr = float(np.linalg.norm(dv))
+        if dist_lr < 0.015:
+            return None
+        n_lr = (dv / dist_lr).tolist()
+        mid_lr = [0.5 * float(pL[0] + pR[0]), 0.5 * float(pL[1] + pR[1]), 0.5 * float(z_min + z_hi)]
+        return {
+            "origin": mid_lr,
+            "normal": n_lr,
+            "bbox_min": [mid_lr[0] - 0.16 * height, mid_lr[1] - 0.16 * height, float(z_min) - 0.05],
+            "bbox_max": [mid_lr[0] + 0.16 * height, mid_lr[1] + 0.16 * height, float(z_hi)],
+            "keep_side": float(side_keep),
+            "affect_parent": False,
+        }
+
+    z_leg_cut_hi = z_min + 0.88 * (min(float(p_chest[2]), float(p_pelvis[2])) - z_min)
+    y_hind_rear_cut = max(float(hl_pts[2][1]), float(hr_pts[2][1])) + 0.055 * height
+    hind_rear_cut = {
+        "origin": [mid_x, y_hind_rear_cut, float(z_min + 0.22 * height)],
+        "normal": [0.0, 1.0, 0.0],  # +Y = tail, -Y = hind legs
+        "bbox_min": [-10.0, y_hind_rear_cut - 0.18 * height, float(z_min) - 0.05],
+        "bbox_max": [10.0, y_hind_rear_cut + 0.25 * height, float(p_pelvis[2]) + 0.04 * height],
+        "keep_side": -1.0,
+        "affect_parent": False,
+    }
+    hind_rbox = {
+        "min": [-10.0, -10.0, float(z_min) - 0.05],
+        "max": [10.0, y_hind_rear_cut + 0.015 * height, float(p_pelvis[2]) + 0.06 * height],
+    }
+
     for side, pts_f, pts_h in (("L", fl_pts, hl_pts), ("R", fr_pts, hr_pts)):
-        # Only enforce side_lock if the leg is actually on that side of mid_x
         sgn = +1.0 if side == "L" else -1.0
         fl_lock = side if (pts_f[2][0] - mid_x) * sgn > 0.01 else "none"
         hl_lock = side if (pts_h[2][0] - mid_x) * sgn > 0.01 else "none"
-        # Front leg (slim pin_radius leaves smooth harmonic blend zone at shoulder/hip)
+
+        f_cut = _leg_bisector_cut(fl_pts[2], fr_pts[2], z_leg_cut_hi, sgn)
+        h_cut = _leg_bisector_cut(hl_pts[2], hr_pts[2], z_leg_cut_hi, sgn)
+        h_cuts = [c for c in (h_cut, hind_rear_cut) if c is not None]
+
+        # Front leg (slim pin_radius + bisector seam_cut prevents L/R front legs sticking together)
         bones[f"front_upper_{side}"] = make_bone(
             "chest", pts_f[0], pts_f[1], skin_group=f"front_leg_{side}", role="limb", side_lock=fl_lock,
-            pin_radius=0.022, limits_deg={"x": [-55, 55], "y": [-20, 20], "z": [-20, 20]},
+            pin_radius=0.022, seam_cut=f_cut,
+            limits_deg={"x": [-55, 55], "y": [-20, 20], "z": [-20, 20]},
         )
         bones[f"front_lower_{side}"] = make_bone(
             f"front_upper_{side}", pts_f[1], pts_f[2], skin_group=f"front_leg_{side}", role="limb", side_lock=fl_lock,
-            pin_radius=0.020, limits_deg={"x": [-85, 20], "y": [-12, 12], "z": [-12, 12]},
+            pin_radius=0.020, seam_cut=f_cut,
+            limits_deg={"x": [-85, 20], "y": [-12, 12], "z": [-12, 12]},
         )
         bones[f"front_paw_{side}"] = make_bone(
             f"front_lower_{side}", pts_f[2], pts_f[3], skin_group=f"front_leg_{side}", role="limb", side_lock=fl_lock,
-            pin_radius=0.020, limits_deg={"x": [-35, 35], "y": [-12, 12], "z": [-15, 15]},
+            pin_radius=0.020, seam_cut=f_cut,
+            limits_deg={"x": [-35, 35], "y": [-12, 12], "z": [-15, 15]},
         )
-        # Hind leg
+        # Hind leg (bisector seam_cut + rear tail-barrier prevents tail/wisps from stretching with hind stride)
         bones[f"hind_upper_{side}"] = make_bone(
             "pelvis", pts_h[0], pts_h[1], skin_group=f"hind_leg_{side}", role="limb", side_lock=hl_lock,
-            pin_radius=0.024, limits_deg={"x": [-55, 55], "y": [-20, 20], "z": [-20, 20]},
+            pin_radius=0.024, seam_cut=h_cuts, region_box=hind_rbox,
+            limits_deg={"x": [-55, 55], "y": [-20, 20], "z": [-20, 20]},
         )
         bones[f"hind_lower_{side}"] = make_bone(
             f"hind_upper_{side}", pts_h[1], pts_h[2], skin_group=f"hind_leg_{side}", role="limb", side_lock=hl_lock,
-            pin_radius=0.020, limits_deg={"x": [-20, 85], "y": [-12, 12], "z": [-12, 12]},
+            pin_radius=0.020, seam_cut=h_cuts, region_box=hind_rbox,
+            limits_deg={"x": [-20, 85], "y": [-12, 12], "z": [-12, 12]},
         )
         bones[f"hind_paw_{side}"] = make_bone(
             f"hind_lower_{side}", pts_h[2], pts_h[3], skin_group=f"hind_leg_{side}", role="limb", side_lock=hl_lock,
-            pin_radius=0.020, limits_deg={"x": [-35, 35], "y": [-12, 12], "z": [-15, 15]},
+            pin_radius=0.020, seam_cut=h_cuts, region_box=hind_rbox,
+            limits_deg={"x": [-35, 35], "y": [-12, 12], "z": [-15, 15]},
         )
 
     return bones
@@ -599,6 +642,11 @@ def add_tail_bones(
         "inertia": 0.52,
         "max_angle_deg": 11.0,
     }
+    tail_rbox = None
+    if "hind_paw_L" in bones and "hind_paw_R" in bones:
+        y_tail_floor = max(float(bones["hind_paw_L"]["head"][1]), float(bones["hind_paw_R"]["head"][1])) + 0.03
+        tail_rbox = {"min": [-10.0, y_tail_floor, -10.0], "max": [10.0, 10.0, 10.0]}
+
     return add_chain(
         bones,
         "tail",
@@ -607,6 +655,7 @@ def add_tail_bones(
         skin_group="tail",
         role="tail",
         influence_radius_scale=1.35,
+        region_box=tail_rbox,
         limits_deg={"x": [-22, 22], "y": [-18, 18], "z": [-28, 28]},
         dynamics=dyn,
         dynamics_tip_boost=1.25,
