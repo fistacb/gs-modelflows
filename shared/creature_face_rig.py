@@ -136,9 +136,9 @@ def detect_eye_contour_and_brow(
     """Separately detect the eye's upper contour (upper eyelash) vs an optional eyebrow above it.
 
     Scans dark-splat density along +Z in the eye's local cheek frame:
-      - Peak 1 (dz in [0.35*rz, 1.15*rz]): upper eye contour / eyelash -> ALWAYS carved & moved by dynamic eyelid.
+      - Peak 1 (dz in [0.65*rz, 1.45*rz]): upper eye contour / eyelash -> ALWAYS carved & moved by dynamic eyelid.
       - Valley above Peak 1: fur/skin gap (`dz_lash_top`).
-      - Peak 2 above valley (dz in [1.20*rz, 2.20*rz]): optional eyebrow -> preserved strictly above `dz_brow_floor`.
+      - Peak 2 above valley (dz >= 1.65*rz): optional eyebrow -> preserved strictly above `dz_brow_floor`.
     """
     sc = np.asarray(eye_meta["surface_center"], dtype=np.float32)
     er = np.asarray(eye_meta["exclusion_radius"], dtype=np.float32)
@@ -154,8 +154,8 @@ def detect_eye_contour_and_brow(
     lum = 0.299 * rgb[:, 0] + 0.587 * rgb[:, 1] + 0.114 * rgb[:, 2]
     sat = rgb.max(axis=1) - rgb.min(axis=1)
     d_fur = np.linalg.norm(rgb - fur_rgb[None, :], axis=1)
-    # Exclude bright saturated fur markings (e.g. orange forehead patterns) from dark lash/brow detection
-    is_bright_marking = (sat > 0.42) & (rgb[:, 0] > 0.52)
+    # Exclude bright saturated fur markings of ANY hue (orange, blue, green patterns) from dark lash/brow detection
+    is_bright_marking = (sat > 0.42) & (rgb.max(axis=1) > 0.52)
     is_dark = (lum < 0.40) & (~is_bright_marking) & (d_fur > 0.22) & (np.abs(loc[:, 0]) <= rx * 1.15) & (np.abs(loc[:, 1]) <= max(er[1] * 1.25, 0.025))
 
     dzs = np.linspace(0.65 * rz, 2.45 * rz, 22)
@@ -229,12 +229,13 @@ def fit_creature_face(
     if len(fxyz) < 100:
         raise RuntimeError(f"Insufficient front face splats ({len(fxyz)}) around head bone")
 
-    # Dominant face fur color from bright cheek/forehead fur near eyes (excludes darker orange markings)
+    # Dominant face fur color from cheek/muzzle fur near eyes (prefer low-saturation base fur so both
+    # light-furred and dark-furred creatures reject vivid markings cleanly!)
     m_cheek = (np.abs(fxyz[:, 0] - head_cx) <= 0.09) & (fxyz[:, 2] <= float(np.percentile(fxyz[:, 2], 70)))
     c_sub = frgb[m_cheek] if int(m_cheek.sum()) >= 20 else frgb
-    c_lum = 0.299 * c_sub[:, 0] + 0.587 * c_sub[:, 1] + 0.114 * c_sub[:, 2]
-    m_bright_fur = c_lum >= float(np.percentile(c_lum, 65))
-    fur_rgb = np.median(c_sub[m_bright_fur], axis=0).astype(np.float32) if np.any(m_bright_fur) else np.median(c_sub, axis=0).astype(np.float32)
+    c_sat = c_sub.max(axis=1) - c_sub.min(axis=1)
+    m_base_fur = c_sat <= float(np.percentile(c_sat, 45))
+    fur_rgb = np.median(c_sub[m_base_fur], axis=0).astype(np.float32) if int(m_base_fur.sum()) >= 12 else np.median(c_sub, axis=0).astype(np.float32)
     d_fur_all = np.linalg.norm(rgb - fur_rgb[None, :], axis=1)
     fur_mask = (op > 0.25) & (d_fur_all < 0.26)
 
@@ -465,7 +466,9 @@ def fit_creature_face(
         mp_med = np.median(xyz[m_mouth_line], axis=0).astype(np.float32)
         mouth_x = float(0.5 * nose_x + 0.5 * float(mp_med[0]))
         mouth_y = float(mp_med[1])
-        mouth_z = float(np.clip(mp_med[2], z_chin_bot + 0.018, z_nose - 0.014))
+        mz_lo = float(z_chin_bot + 0.018)
+        mz_hi = float(max(mz_lo, z_nose - 0.014))
+        mouth_z = float(np.clip(mp_med[2], mz_lo, mz_hi))
         mouth_line_rgb = np.clip(np.median(rgb[m_mouth_line], axis=0), 0.20, 0.85).astype(np.float32)
     else:
         mouth_line_rgb = np.array([0.74, 0.44, 0.42], dtype=np.float32)
@@ -518,8 +521,11 @@ def fit_creature_face(
 
 
 def carve_creature_sockets(data: np.ndarray, face_meta: dict[str, Any]) -> np.ndarray:
-    """Color-guided socket carving: removes original painted iris/sclera splats while
-    strictly preserving surrounding face fur and dark upper-eyelash contour lines!
+    """Color-guided socket carving & soft fur-inpainting:
+    1) Carves inner iris/sclera + static upper eye-contour (strictly below `dz_brow_floor` so eyebrows stay intact).
+    2) Softly fur-inpaints painterly eye-shadow/corner halo remnants without creating holes in the face.
+    3) Softly fur-inpaints the static closed-mouth smile line (strictly protecting the nose tip) so the unified
+       dynamic mouth never produces a double-mouth when opening.
     """
     xyz = np.column_stack([data["x"], data["y"], data["z"]]).astype(np.float32)
     fdc = np.column_stack([data["f_dc_0"], data["f_dc_1"], data["f_dc_2"]]).astype(np.float32)
@@ -665,10 +671,12 @@ def carve_creature_sockets(data: np.ndarray, face_meta: dict[str, Any]) -> np.nd
         d_fur_m = np.linalg.norm(rgb_o - fur_rgb[None, :], axis=1)
         lum_m = 0.299 * rgb_o[:, 0] + 0.587 * rgb_o[:, 1] + 0.114 * rgb_o[:, 2]
 
+        nose_guard_hi = max(mw * 0.145, 0.006)
+        nose_guard_lo = max(mw * 0.27, 0.012)
         w_mx = _smoothstep(mw * 0.70, mw * 0.40, np.abs(xyz_o[:, 0] - mc[0]))
-        w_my = _smoothstep(mc[1] + 0.032, mc[1] + 0.012, xyz_o[:, 1])
-        w_mz_top = _smoothstep(float(np_pos[2]) - 0.008, float(np_pos[2]) - 0.015, xyz_o[:, 2])
-        w_mz_bot = _smoothstep(mc[2] - 0.026, mc[2] - 0.012, xyz_o[:, 2])
+        w_my = _smoothstep(mc[1] + max(mw * 0.58, 0.025), mc[1] + max(mw * 0.22, 0.010), xyz_o[:, 1])
+        w_mz_top = _smoothstep(float(np_pos[2]) - nose_guard_hi, float(np_pos[2]) - nose_guard_lo, xyz_o[:, 2])
+        w_mz_bot = _smoothstep(mc[2] - max(mw * 0.47, 0.020), mc[2] - max(mw * 0.22, 0.010), xyz_o[:, 2])
         w_mcol = _smoothstep(0.10, 0.20, d_fur_m) * _smoothstep(0.84, 0.68, lum_m)
         alpha_m = (w_mx * w_my * w_mz_top * w_mz_bot * w_mcol * 0.96).astype(np.float32)
         m_mblend = alpha_m > 0.03
@@ -860,7 +868,7 @@ def build_creature_eyelid_shell(
         on_lid = in_ell & (dz >= z_min_curt)
         if np.any(on_lid):
             dx_c, dz_c = dx[on_lid], dz[on_lid]
-            curt_pts, curt_nrm = _to_world_pts_and_nrm(dx_c, dz_c, y_push=0.0052)
+            curt_pts, curt_nrm = _to_world_pts_and_nrm(dx_c, dz_c, y_push=max(r_eye * 0.22, 0.0040))
             fur_c = np.asarray(fur_rgb, dtype=np.float32)
             if body_xyz is not None and body_rgb is not None and len(body_xyz) >= 50:
                 from scipy.spatial import cKDTree as _cKDTree
@@ -891,7 +899,9 @@ def build_creature_eyelid_shell(
     half_thick = max(rz * thick_scale, 0.0020) * taper
     dx_l = u_l * rx
     dz_l = (z_edge_base + arch_amp * (1.0 - u_l * u_l)) + v_l * half_thick
-    lash_pts, lash_nrm = _to_world_pts_and_nrm(dx_l, dz_l, y_push=0.0060 + 0.0010 * b_t)
+    lash_pts, lash_nrm = _to_world_pts_and_nrm(
+        dx_l, dz_l, y_push=max(r_eye * 0.25, 0.0048) + max(r_eye * 0.042, 0.0008) * b_t
+    )
 
     # Sample local fur color right at the lash points so feather edges blend seamlessly into the face
     fur_c = np.asarray(fur_rgb, dtype=np.float32)
@@ -990,7 +1000,7 @@ def build_creature_mouth_patch(
         thick = max(mw * 0.032, 0.0014) * np.sqrt(np.maximum(0.15, 1.0 - (u * 0.92) ** 2))
         # Cute gentle upward-curved fox smile arc (`u*u` rises at corners)
         z_arc = mc[2] + mw * 0.045 * (u * u - 0.35) + v * thick
-        y_arc = mc[1] - 0.0046 + 0.0012 * (u * u)
+        y_arc = mc[1] - max(mw * 0.084, 0.0036) + max(mw * 0.022, 0.0008) * (u * u)
         pts = np.column_stack([mc[0] + u * rx_s, y_arc, z_arc]).astype(np.float32)
 
         w_v = np.exp(-(v / 0.65) ** 2)
@@ -1031,7 +1041,7 @@ def build_creature_mouth_patch(
 
     # Anchor upper lip right on the closed smile line and expand downward as jaw opens!
     z_center = float(mc[2]) - rz * 0.55
-    y_bowl = mc[1] - 0.0052 + 0.0008 * (1.0 - r2)
+    y_bowl = mc[1] - max(mw * 0.095, 0.0040) + max(mw * 0.015, 0.0006) * (1.0 - r2)
     pts = np.column_stack([
         mc[0] + u * rx,
         y_bowl,
@@ -1076,9 +1086,7 @@ def build_inner_mouth_patch(
     dtype: np.dtype,
     n_pts: int = 420,
 ) -> np.ndarray:
-    """Build a dark-rose inner mouth cavity dome sitting slightly behind the muzzle opening
-    so opening the `jaw` bone reveals a warm mouth interior instead of an empty void.
-    """
+    """[Deprecated] Legacy static inner-mouth dome; superseded by unified `build_creature_mouth_patch`."""
     mc = np.asarray(face_meta["mouth_center"], dtype=np.float32)
     mw = float(face_meta.get("mouth_width", 0.045))
     mh = mw * 0.52

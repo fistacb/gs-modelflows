@@ -272,7 +272,7 @@ def main():
                 extra_plys.append(lid_files[(side, bi)])
                 extra_xforms.append(qp_hd)
 
-        # Attach animated mouth patch ONLY when mouth is open (ZERO bleed-through when closed!)
+        # Attach unified dynamic mouth patch (closed smile line at mi=0 -> smoothly opening at mi=1..7)
         mi = int(np.argmin([abs(m_open - lvl) for lvl in mouth_levels]))
         if mi in mouth_files:
             extra_plys.append(mouth_files[mi])
